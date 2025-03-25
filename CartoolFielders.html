@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CARTOol - Fielders</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    body {
+      background: linear-gradient(135deg, #74ABE2, #5563DE);
+      color: #fff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+      text-align: center;
+    }
+    .button {
+      display: inline-block;
+      background-color: rgba(255, 255, 255, 0.2);
+      border: 2px solid #fff;
+      border-radius: 50px;
+      padding: 15px 30px;
+      font-size: 1.2em;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      margin-top: 20px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      text-decoration: none;
+    }
+    .button:hover {
+      background-color: rgba(255, 255, 255, 0.3);
+      transform: translateY(-3px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    }
+    input[type="file"] {
+      margin-top: 20px;
+      font-size: 1em;
+      color: #fff;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+      background: rgba(255, 255, 255, 0.1);
+    }
+    table, th, td {
+      border: 1px solid rgba(255, 255, 255, 0.3);
+    }
+    th, td {
+      padding: 10px;
+      text-align: center;
+    }
+    th { background: rgba(255, 255, 255, 0.2); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>CARTOol - Fielders</h2>
+    <p>Please only use Katapult reports "Node Attributes with IDs" for this process</p>
+    <input type="file" id="fileInput" accept=".xlsx">
+    <br>
+    <button class="button" id="analyzeBtn">ANALYZE</button>
+    <div id="report"></div>
+  </div>
+  
+  <!-- Include SheetJS library for processing XLSX files -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script>
+    document.getElementById('analyzeBtn').addEventListener('click', function() {
+      var fileInput = document.getElementById('fileInput');
+      if (!fileInput.files.length) {
+        alert('Please select a .xlsx file first.');
+        return;
+      }
+      var file = fileInput.files[0];
+      var reader = new FileReader();
+      reader.onload = function(e) {
+        var data = new Uint8Array(e.target.result);
+        var workbook = XLSX.read(data, {type: 'array'});
+        var firstSheetName = workbook.SheetNames[0];
+        var worksheet = workbook.Sheets[firstSheetName];
+        var rows = XLSX.utils.sheet_to_json(worksheet, {header:1});
+        
+        if (rows.length < 2) {
+          document.getElementById('report').innerHTML = '<p>No data found in the spreadsheet.</p>';
+          return;
+        }
+        
+        // Get header indexes
+        var headers = rows[0];
+        var nodeTypeIndex = headers.indexOf("node_type");
+        var timeBucketStartIndex = headers.indexOf("time_bucket_start");
+        var timeBucketUserIndex = headers.indexOf("time_bucket_user");
+        
+        if (nodeTypeIndex === -1 || timeBucketStartIndex === -1 || timeBucketUserIndex === -1) {
+          document.getElementById('report').innerHTML = '<p>Required columns not found in the spreadsheet.</p>';
+          return;
+        }
+        
+        // Process rows: filter for node_type "pole" and extract user and date
+        var filteredData = [];
+        for (var i = 1; i < rows.length; i++) {
+          var row = rows[i];
+          if (row[nodeTypeIndex] && row[nodeTypeIndex].toString().toLowerCase() === 'pole') {
+            // Extract date from time_bucket_start column
+            var dateValue = row[timeBucketStartIndex];
+            var dateObj = new Date(dateValue);
+            // Format date as YYYY-MM-DD
+            var formattedDate = dateObj.getFullYear() + '-' + 
+                                ('0' + (dateObj.getMonth() + 1)).slice(-2) + '-' + 
+                                ('0' + dateObj.getDate()).slice(-2);
+            filteredData.push({
+              user: row[timeBucketUserIndex],
+              date: formattedDate
+            });
+          }
+        }
+        
+        if (filteredData.length === 0) {
+          document.getElementById('report').innerHTML = '<p>No entries with node_type "pole" found.</p>';
+          return;
+        }
+        
+        // Sort filteredData by user in descending order
+        filteredData.sort(function(a, b) {
+          if (a.user < b.user) return 1;
+          if (a.user > b.user) return -1;
+          return 0;
+        });
+        
+        // Build aggregated statistics:
+        // 1. Distinct user count per date
+        // 2. Entry count for each user and date
+        var summaryByDate = {};     // date => Set of users
+        var summaryByUserDate = {}; // key: "user|date" => count
+        
+        filteredData.forEach(function(entry) {
+          // For distinct user count per date
+          if (!summaryByDate[entry.date]) {
+            summaryByDate[entry.date] = new Set();
+          }
+          summaryByDate[entry.date].add(entry.user);
+          
+          // For entry count per user and date
+          var key = entry.user + '|' + entry.date;
+          if (!summaryByUserDate[key]) {
+            summaryByUserDate[key] = 0;
+          }
+          summaryByUserDate[key]++;
+        });
+        
+        // Build HTML for report
+        var reportHTML = '<h3>Aggregated Statistics</h3>';
+        reportHTML += '<table><tr><th>Date</th><th>Distinct Users Count</th></tr>';
+        for (var date in summaryByDate) {
+          reportHTML += '<tr><td>' + date + '</td><td>' + summaryByDate[date].size + '</td></tr>';
+        }
+        reportHTML += '</table>';
+        
+        reportHTML += '<h3>Entries per User and Date</h3>';
+        reportHTML += '<table><tr><th>User</th><th>Date</th><th>Entry Count</th></tr>';
+        for (var key in summaryByUserDate) {
+          var parts = key.split('|');
+          reportHTML += '<tr><td>' + parts[0] + '</td><td>' + parts[1] + '</td><td>' + summaryByUserDate[key] + '</td></tr>';
+        }
+        reportHTML += '</table>';
+        
+        reportHTML += '<h3>Detailed Entries (Sorted by User Descending)</h3>';
+        reportHTML += '<table><tr><th>User</th><th>Date</th></tr>';
+        filteredData.forEach(function(entry) {
+          reportHTML += '<tr><td>' + entry.user + '</td><td>' + entry.date + '</td></tr>';
+        });
+        reportHTML += '</table>';
+        
+        document.getElementById('report').innerHTML = reportHTML;
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  </script>
+</body>
+</html>
