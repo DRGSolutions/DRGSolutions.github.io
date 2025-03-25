@@ -3,10 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CARTOol - Fielders</title>
+  <title>CARTOol - Designers</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    /* Reset margins and padding */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+    /* Center content with a smooth gradient background */
     body {
       background: linear-gradient(135deg, #74ABE2, #5563DE);
       color: #fff;
@@ -20,6 +29,13 @@
       max-width: 800px;
       text-align: center;
     }
+    h2 {
+      margin-bottom: 10px;
+    }
+    p {
+      margin-bottom: 20px;
+    }
+    /* Stylish button design */
     .button {
       display: inline-block;
       background-color: rgba(255, 255, 255, 0.2);
@@ -59,12 +75,14 @@
       padding: 10px;
       text-align: center;
     }
-    th { background: rgba(255, 255, 255, 0.2); }
+    th {
+      background: rgba(255, 255, 255, 0.2);
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h2>CARTOol - Fielders</h2>
+    <h2>CARTOol - Designers</h2>
     <p>Please only use Katapult reports "Node Attributes with IDs" for this process</p>
     <input type="file" id="fileInput" accept=".xlsx">
     <br>
@@ -106,8 +124,8 @@
           return;
         }
         
-        // Process rows: filter for node_type "pole" and extract user and date
-        var filteredData = [];
+        // Build main statistics: count entries per user and date after filtering rows with node_type "pole"
+        var summaryByUserDate = {}; // key: "user|date"
         for (var i = 1; i < rows.length; i++) {
           var row = rows[i];
           if (row[nodeTypeIndex] && row[nodeTypeIndex].toString().toLowerCase() === 'pole') {
@@ -118,66 +136,35 @@
             var formattedDate = dateObj.getFullYear() + '-' + 
                                 ('0' + (dateObj.getMonth() + 1)).slice(-2) + '-' + 
                                 ('0' + dateObj.getDate()).slice(-2);
-            filteredData.push({
-              user: row[timeBucketUserIndex],
-              date: formattedDate
-            });
+            var user = row[timeBucketUserIndex];
+            var key = user + '|' + formattedDate;
+            if (!summaryByUserDate[key]) {
+              summaryByUserDate[key] = 0;
+            }
+            summaryByUserDate[key]++;
           }
         }
         
-        if (filteredData.length === 0) {
+        if (Object.keys(summaryByUserDate).length === 0) {
           document.getElementById('report').innerHTML = '<p>No entries with node_type "pole" found.</p>';
           return;
         }
         
-        // Sort filteredData by user in descending order
-        filteredData.sort(function(a, b) {
-          if (a.user < b.user) return 1;
-          if (a.user > b.user) return -1;
+        // Build HTML for main statistics table
+        var reportHTML = '<h3>Entries per User and Date</h3>';
+        reportHTML += '<table><tr><th>User</th><th>Date</th><th>Entry Count</th></tr>';
+        // Sort keys in descending order by user name
+        var keys = Object.keys(summaryByUserDate);
+        keys.sort(function(a, b) {
+          var userA = a.split('|')[0];
+          var userB = b.split('|')[0];
+          if (userA < userB) return 1;
+          if (userA > userB) return -1;
           return 0;
         });
-        
-        // Build aggregated statistics:
-        // 1. Distinct user count per date
-        // 2. Entry count for each user and date
-        var summaryByDate = {};     // date => Set of users
-        var summaryByUserDate = {}; // key: "user|date" => count
-        
-        filteredData.forEach(function(entry) {
-          // For distinct user count per date
-          if (!summaryByDate[entry.date]) {
-            summaryByDate[entry.date] = new Set();
-          }
-          summaryByDate[entry.date].add(entry.user);
-          
-          // For entry count per user and date
-          var key = entry.user + '|' + entry.date;
-          if (!summaryByUserDate[key]) {
-            summaryByUserDate[key] = 0;
-          }
-          summaryByUserDate[key]++;
-        });
-        
-        // Build HTML for report
-        var reportHTML = '<h3>Aggregated Statistics</h3>';
-        reportHTML += '<table><tr><th>Date</th><th>Distinct Users Count</th></tr>';
-        for (var date in summaryByDate) {
-          reportHTML += '<tr><td>' + date + '</td><td>' + summaryByDate[date].size + '</td></tr>';
-        }
-        reportHTML += '</table>';
-        
-        reportHTML += '<h3>Entries per User and Date</h3>';
-        reportHTML += '<table><tr><th>User</th><th>Date</th><th>Entry Count</th></tr>';
-        for (var key in summaryByUserDate) {
+        keys.forEach(function(key) {
           var parts = key.split('|');
           reportHTML += '<tr><td>' + parts[0] + '</td><td>' + parts[1] + '</td><td>' + summaryByUserDate[key] + '</td></tr>';
-        }
-        reportHTML += '</table>';
-        
-        reportHTML += '<h3>Detailed Entries (Sorted by User Descending)</h3>';
-        reportHTML += '<table><tr><th>User</th><th>Date</th></tr>';
-        filteredData.forEach(function(entry) {
-          reportHTML += '<tr><td>' + entry.user + '</td><td>' + entry.date + '</td></tr>';
         });
         reportHTML += '</table>';
         
