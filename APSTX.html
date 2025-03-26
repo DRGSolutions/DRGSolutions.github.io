@@ -27,32 +27,6 @@
       width: 80%;
       max-width: 800px;
     }
-    /* File input styled like a button */
-    #fileInput {
-      margin-top: 20px;
-      padding: 15px 30px;
-      font-size: 1.2em;
-      color: #fff;
-      background-color: rgba(255, 255, 255, 0.2);
-      border: 2px solid #fff;
-      border-radius: 50px;
-      cursor: pointer;
-      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-      text-decoration: none;
-    }
-    /* Hide the default file input appearance */
-    #fileInput::-webkit-file-upload-button {
-      visibility: hidden;
-    }
-    #fileInput::before {
-      content: 'Upload Spreadsheet';
-      display: inline-block;
-      background: transparent;
-      border: none;
-      outline: none;
-      cursor: pointer;
-    }
-    /* Styling for results */
     .result {
       background-color: rgba(255, 255, 255, 0.1);
       padding: 10px;
@@ -70,87 +44,83 @@
 <body>
   <div class="container">
     <h1>APS (Active Projects Search) TX</h1>
-    <input type="file" id="fileInput" accept=".xlsx, .xls, .csv" />
     <div id="results">
-      <p>Awaiting file upload...</p>
+      <p>Loading data from spreadsheet...</p>
     </div>
   </div>
-
+  
   <!-- Load SheetJS library from CDN -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script>
-    // Listen for file selection
-    document.getElementById('fileInput').addEventListener('change', handleFile, false);
+    // URL of the published CSV from your Google Sheet.
+    const csvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLes4p_pzZFdK0P4DjMuZCjTynqO4LXn-bxTQ03Jh0x_775H3ch2qHRDBAQ0v7yFWdL1uQA5p2AdXj/pub?output=csv";
     
-    function handleFile(e) {
-      const file = e.target.files[0];
-      if (!file) return;
+    // Fetch the CSV file.
+    fetch(csvUrl)
+      .then(response => response.text())
+      .then(csvText => {
+          // Parse CSV using SheetJS.
+          const workbook = XLSX.read(csvText, { type: 'string' });
+          // Since it's a CSV, there's typically one sheet.
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          // Convert the sheet to a 2D array where the first row is the header.
+          const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+          processSheetData(sheetData);
+      })
+      .catch(error => {
+          document.getElementById("results").innerHTML = "<p>Error loading data: " + error.message + "</p>";
+      });
       
-      const reader = new FileReader();
-      reader.onload = function(e) {
-        const data = new Uint8Array(e.target.result);
-        const workbook = XLSX.read(data, { type: 'array' });
-        processWorkbook(workbook);
-      };
-      reader.readAsArrayBuffer(file);
-    }
-    
-    function processWorkbook(workbook) {
+    function processSheetData(sheetData) {
       const resultsDiv = document.getElementById('results');
-      resultsDiv.innerHTML = ""; // Clear previous results
+      resultsDiv.innerHTML = "";
       
-      // Iterate over each sheet in the workbook
-      workbook.SheetNames.forEach(function(sheetName) {
-        const worksheet = workbook.Sheets[sheetName];
-        // Convert the sheet to a 2D array (array of arrays) where the first row is the header row.
-        const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-        if (sheetData.length < 2) return; // skip if there's no header or no data
-        
-        // Get header row and check for "Current Responsibility"
-        const headers = sheetData[0];
-        const currentRespIndex = headers.indexOf("Current Responsibility");
-        if (currentRespIndex === -1) return; // Skip sheet if header not found
-        
-        // Identify other column indices:
-        const currentStatusIndex = headers.indexOf("Current Status");
-        const latestCommentIndex = headers.indexOf("Latest Comment");
-        const commentDateIndex = headers.indexOf("Comment Date");
-        // For Column D, we use index 3 (0-based)
-        const colDIndex = 3;
-        
-        let sheetOutput = `<h2>Sheet: ${sheetName}</h2>`;
-        let foundMatch = false;
-        
-        // Loop over rows starting at row 2 (index 1)
-        for (let i = 1; i < sheetData.length; i++) {
+      if (sheetData.length < 2) {
+          resultsDiv.innerHTML = "<p>No data found.</p>";
+          return;
+      }
+      
+      // Get header row.
+      const headers = sheetData[0];
+      const currentRespIndex = headers.indexOf("Current Responsibility");
+      if (currentRespIndex === -1) {
+          resultsDiv.innerHTML = "<p>The sheet does not contain a 'Current Responsibility' column.</p>";
+          return;
+      }
+      
+      // Identify additional columns.
+      const currentStatusIndex = headers.indexOf("Current Status");
+      const latestCommentIndex = headers.indexOf("Latest Comment");
+      const commentDateIndex = headers.indexOf("Comment Date");
+      // Column D is index 3 (0-based)
+      const colDIndex = 3;
+      
+      let output = "";
+      // Process rows starting from row 2.
+      for (let i = 1; i < sheetData.length; i++) {
           const row = sheetData[i];
           const currentResp = row[currentRespIndex];
           if (currentResp && currentResp.toString().toLowerCase().includes("joe komodi")) {
-            foundMatch = true;
-            const colD = row[colDIndex] || "";
-            const currentStatus = currentStatusIndex !== -1 ? (row[currentStatusIndex] || "") : "";
-            const latestComment = latestCommentIndex !== -1 ? (row[latestCommentIndex] || "") : "";
-            const commentDate = commentDateIndex !== -1 ? (row[commentDateIndex] || "") : "";
-            
-            sheetOutput += `<div class="result">
-              <p><strong>Current Responsibility:</strong> ${currentResp}</p>
-              <p><strong>Column D:</strong> ${colD}</p>
-              <p><strong>Current Status:</strong> ${currentStatus}</p>
-              <p><strong>Latest Comment:</strong> ${latestComment} ${commentDate ? "(" + commentDate + ")" : ""}</p>
-            </div><hr/>`;
+              const colD = row[colDIndex] || "";
+              const currentStatus = currentStatusIndex !== -1 ? (row[currentStatusIndex] || "") : "";
+              const latestComment = latestCommentIndex !== -1 ? (row[latestCommentIndex] || "") : "";
+              const commentDate = commentDateIndex !== -1 ? (row[commentDateIndex] || "") : "";
+              
+              output += `<div class="result">
+                <p><strong>Current Responsibility:</strong> ${currentResp}</p>
+                <p><strong>Column D:</strong> ${colD}</p>
+                <p><strong>Current Status:</strong> ${currentStatus}</p>
+                <p><strong>Latest Comment:</strong> ${latestComment}${commentDate ? " (" + commentDate + ")" : ""}</p>
+              </div><hr/>`;
           }
-        }
-        
-        if (!foundMatch) {
-          sheetOutput += `<p>No matching data found in this sheet.</p>`;
-        }
-        resultsDiv.innerHTML += sheetOutput;
-      });
-      
-      // If no sheet produced any output, show a default message.
-      if (resultsDiv.innerHTML.trim() === "") {
-        resultsDiv.innerHTML = "<p>No matching data found in any sheets.</p>";
       }
+      
+      if (!output) {
+          output = "<p>No matching data found.</p>";
+      }
+      
+      resultsDiv.innerHTML = output;
     }
   </script>
 </body>
