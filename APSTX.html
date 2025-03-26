@@ -54,8 +54,8 @@
   <script>
     // URL of the published CSV from your Google Sheet.
     const csvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLes4p_pzZFdK0P4DjMuZCjTynqO4LXn-bxTQ03Jh0x_775H3ch2qHRDBAQ0v7yFWdL1uQA5p2AdXj/pub?output=csv";
-    // Use Thingproxy as a CORS proxy.
-    const proxyUrl = "https://thingproxy.freeboard.io/fetch/";
+    // Use cors-anywhere proxy (requires temporary access request)
+    const proxyUrl = "https://cors-anywhere.herokuapp.com/";
     const fetchUrl = proxyUrl + csvUrl;
     
     fetch(fetchUrl)
