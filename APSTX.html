@@ -54,29 +54,26 @@
   <script>
     // URL of the published CSV from your Google Sheet.
     const csvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLes4p_pzZFdK0P4DjMuZCjTynqO4LXn-bxTQ03Jh0x_775H3ch2qHRDBAQ0v7yFWdL1uQA5p2AdXj/pub?output=csv";
-    
-    // Use AllOrigins as a CORS proxy
-    const proxyUrl = "https://api.allorigins.hexocode.repl.co/get?disableCache=true&url=";
-    const fetchUrl = proxyUrl + encodeURIComponent(csvUrl);
+    // Use Thingproxy as a CORS proxy.
+    const proxyUrl = "https://thingproxy.freeboard.io/fetch/";
+    const fetchUrl = proxyUrl + csvUrl;
     
     fetch(fetchUrl)
       .then(response => {
-          if (!response.ok) {
-              throw new Error("Network response was not ok");
-          }
-          return response.json();
+         if (!response.ok) {
+           throw new Error("Network response was not ok");
+         }
+         return response.text();
       })
-      .then(data => {
-          // data.contents holds the CSV text
-          const csvText = data.contents;
-          const workbook = XLSX.read(csvText, { type: 'string' });
-          const sheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[sheetName];
-          const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-          processSheetData(sheetData);
+      .then(csvText => {
+         const workbook = XLSX.read(csvText, { type: 'string' });
+         const sheetName = workbook.SheetNames[0];
+         const worksheet = workbook.Sheets[sheetName];
+         const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+         processSheetData(sheetData);
       })
       .catch(error => {
-          document.getElementById("results").innerHTML = "<p>Error loading data: " + error.message + "</p>";
+         document.getElementById("results").innerHTML = "<p>Error loading data: " + error.message + "</p>";
       });
       
     function processSheetData(sheetData) {
@@ -84,16 +81,16 @@
       resultsDiv.innerHTML = "";
       
       if (sheetData.length < 2) {
-          resultsDiv.innerHTML = "<p>No data found.</p>";
-          return;
+         resultsDiv.innerHTML = "<p>No data found.</p>";
+         return;
       }
       
       // Get header row.
       const headers = sheetData[0];
       const currentRespIndex = headers.indexOf("Current Responsibility");
       if (currentRespIndex === -1) {
-          resultsDiv.innerHTML = "<p>The sheet does not contain a 'Current Responsibility' column.</p>";
-          return;
+         resultsDiv.innerHTML = "<p>The sheet does not contain a 'Current Responsibility' column.</p>";
+         return;
       }
       
       // Identify additional columns.
@@ -106,25 +103,25 @@
       let output = "";
       // Process rows starting from row 2.
       for (let i = 1; i < sheetData.length; i++) {
-          const row = sheetData[i];
-          const currentResp = row[currentRespIndex];
-          if (currentResp && currentResp.toString().toLowerCase().includes("joe komodi")) {
-              const colD = row[colDIndex] || "";
-              const currentStatus = currentStatusIndex !== -1 ? (row[currentStatusIndex] || "") : "";
-              const latestComment = latestCommentIndex !== -1 ? (row[latestCommentIndex] || "") : "";
-              const commentDate = commentDateIndex !== -1 ? (row[commentDateIndex] || "") : "";
-              
-              output += `<div class="result">
-                <p><strong>Current Responsibility:</strong> ${currentResp}</p>
-                <p><strong>Column D:</strong> ${colD}</p>
-                <p><strong>Current Status:</strong> ${currentStatus}</p>
-                <p><strong>Latest Comment:</strong> ${latestComment}${commentDate ? " (" + commentDate + ")" : ""}</p>
-              </div><hr/>`;
-          }
+         const row = sheetData[i];
+         const currentResp = row[currentRespIndex];
+         if (currentResp && currentResp.toString().toLowerCase().includes("joe komodi")) {
+            const colD = row[colDIndex] || "";
+            const currentStatus = currentStatusIndex !== -1 ? (row[currentStatusIndex] || "") : "";
+            const latestComment = latestCommentIndex !== -1 ? (row[latestCommentIndex] || "") : "";
+            const commentDate = commentDateIndex !== -1 ? (row[commentDateIndex] || "") : "";
+            
+            output += `<div class="result">
+              <p><strong>Current Responsibility:</strong> ${currentResp}</p>
+              <p><strong>Column D:</strong> ${colD}</p>
+              <p><strong>Current Status:</strong> ${currentStatus}</p>
+              <p><strong>Latest Comment:</strong> ${latestComment}${commentDate ? " (" + commentDate + ")" : ""}</p>
+            </div><hr/>`;
+         }
       }
       
       if (!output) {
-          output = "<p>No matching data found.</p>";
+         output = "<p>No matching data found.</p>";
       }
       
       resultsDiv.innerHTML = output;
