@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>APS TX - Active Projects Search</title>
   <style>
-    /* Reset and base styling */
+    /* Basic reset and base styling matching index.html */
     * {
       margin: 0;
       padding: 0;
@@ -15,7 +15,6 @@
       height: 100%;
       font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
     }
-    /* Background gradient and centered content */
     body {
       display: flex;
       justify-content: center;
@@ -23,18 +22,43 @@
       background: linear-gradient(135deg, #74ABE2, #5563DE);
       color: #fff;
     }
-    /* Container styling */
     .container {
       text-align: center;
       width: 80%;
       max-width: 800px;
     }
-    /* Styling for each result block */
+    /* File input styled like a button */
+    #fileInput {
+      margin-top: 20px;
+      padding: 15px 30px;
+      font-size: 1.2em;
+      color: #fff;
+      background-color: rgba(255, 255, 255, 0.2);
+      border: 2px solid #fff;
+      border-radius: 50px;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      text-decoration: none;
+    }
+    /* Hide the default file input appearance */
+    #fileInput::-webkit-file-upload-button {
+      visibility: hidden;
+    }
+    #fileInput::before {
+      content: 'Upload Spreadsheet';
+      display: inline-block;
+      background: transparent;
+      border: none;
+      outline: none;
+      cursor: pointer;
+    }
+    /* Styling for results */
     .result {
       background-color: rgba(255, 255, 255, 0.1);
       padding: 10px;
       margin: 10px 0;
       border-radius: 8px;
+      text-align: left;
     }
     hr {
       border: 0;
@@ -42,74 +66,92 @@
       background: rgba(255,255,255,0.3);
     }
   </style>
-  <!-- Load Tabletop.js library from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/tabletop@1.5.1/src/tabletop.min.js"></script>
 </head>
 <body>
   <div class="container">
     <h1>APS (Active Projects Search) TX</h1>
+    <input type="file" id="fileInput" accept=".xlsx, .xls, .csv" />
     <div id="results">
-      <p>Loading data from spreadsheet...</p>
+      <p>Awaiting file upload...</p>
     </div>
   </div>
+
+  <!-- Load SheetJS library from CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script>
-    // This function initializes Tabletop to load the spreadsheet.
-    // Ensure your spreadsheet is published or shared appropriately.
-    function init() {
-      Tabletop.init({
-        key: '1mwRKCktMmcoKXwx8_BEfWGdNKCdtyB1zBP-4c1kF460',
-        callback: processData,
-        simpleSheet: false, // we want data from all sheets
-        debug: false
-      });
+    // Listen for file selection
+    document.getElementById('fileInput').addEventListener('change', handleFile, false);
+    
+    function handleFile(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        processWorkbook(workbook);
+      };
+      reader.readAsArrayBuffer(file);
     }
     
-    // Process the data once loaded from the spreadsheet.
-    function processData(data, tabletop) {
-      var container = document.getElementById("results");
-      var outputHTML = "";
+    function processWorkbook(workbook) {
+      const resultsDiv = document.getElementById('results');
+      resultsDiv.innerHTML = ""; // Clear previous results
       
-      // Loop through each sheet in the spreadsheet.
-      for (var sheetName in data) {
-        // Tabletop returns each sheet's data as an array.
-        var sheetData = data[sheetName].elements ? data[sheetName].elements : data[sheetName];
-        if (sheetData.length > 0) {
-          // Check if the sheet has a "Current Responsibility" header.
-          var headers = Object.keys(sheetData[0]);
-          if (headers.indexOf("Current Responsibility") !== -1) {
-            sheetData.forEach(function(row) {
-              // Filter rows where "Current Responsibility" includes "joe komodi" (case-insensitive).
-              if (row["Current Responsibility"] && row["Current Responsibility"].toLowerCase().includes("joe komodi")) {
-                // Get Column D value by assuming it is the 4th column.
-                var keys = Object.keys(row);
-                var colD = keys.length >= 4 ? row[keys[3]] : "";
-                // Get Current Status.
-                var currentStatus = row["Current Status"] ? row["Current Status"] : "";
-                // Get the latest comment and comment date (adjust these keys if necessary).
-                var latestComment = row["Latest Comment"] ? row["Latest Comment"] : "";
-                var commentDate = row["Comment Date"] ? row["Comment Date"] : "";
-                
-                outputHTML += "<div class='result'>";
-                outputHTML += "<p><strong>Current Responsibility:</strong> " + row["Current Responsibility"] + "</p>";
-                outputHTML += "<p><strong>Column D:</strong> " + colD + "</p>";
-                outputHTML += "<p><strong>Current Status:</strong> " + currentStatus + "</p>";
-                outputHTML += "<p><strong>Latest Comment:</strong> " + latestComment + (commentDate ? " (" + commentDate + ")" : "") + "</p>";
-                outputHTML += "</div><hr/>";
-              }
-            });
+      // Iterate over each sheet in the workbook
+      workbook.SheetNames.forEach(function(sheetName) {
+        const worksheet = workbook.Sheets[sheetName];
+        // Convert the sheet to a 2D array (array of arrays) where the first row is the header row.
+        const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+        if (sheetData.length < 2) return; // skip if there's no header or no data
+        
+        // Get header row and check for "Current Responsibility"
+        const headers = sheetData[0];
+        const currentRespIndex = headers.indexOf("Current Responsibility");
+        if (currentRespIndex === -1) return; // Skip sheet if header not found
+        
+        // Identify other column indices:
+        const currentStatusIndex = headers.indexOf("Current Status");
+        const latestCommentIndex = headers.indexOf("Latest Comment");
+        const commentDateIndex = headers.indexOf("Comment Date");
+        // For Column D, we use index 3 (0-based)
+        const colDIndex = 3;
+        
+        let sheetOutput = `<h2>Sheet: ${sheetName}</h2>`;
+        let foundMatch = false;
+        
+        // Loop over rows starting at row 2 (index 1)
+        for (let i = 1; i < sheetData.length; i++) {
+          const row = sheetData[i];
+          const currentResp = row[currentRespIndex];
+          if (currentResp && currentResp.toString().toLowerCase().includes("joe komodi")) {
+            foundMatch = true;
+            const colD = row[colDIndex] || "";
+            const currentStatus = currentStatusIndex !== -1 ? (row[currentStatusIndex] || "") : "";
+            const latestComment = latestCommentIndex !== -1 ? (row[latestCommentIndex] || "") : "";
+            const commentDate = commentDateIndex !== -1 ? (row[commentDateIndex] || "") : "";
+            
+            sheetOutput += `<div class="result">
+              <p><strong>Current Responsibility:</strong> ${currentResp}</p>
+              <p><strong>Column D:</strong> ${colD}</p>
+              <p><strong>Current Status:</strong> ${currentStatus}</p>
+              <p><strong>Latest Comment:</strong> ${latestComment} ${commentDate ? "(" + commentDate + ")" : ""}</p>
+            </div><hr/>`;
           }
         }
-      }
+        
+        if (!foundMatch) {
+          sheetOutput += `<p>No matching data found in this sheet.</p>`;
+        }
+        resultsDiv.innerHTML += sheetOutput;
+      });
       
-      if(outputHTML === ""){
-         outputHTML = "<p>No matching data found...</p>";
+      // If no sheet produced any output, show a default message.
+      if (resultsDiv.innerHTML.trim() === "") {
+        resultsDiv.innerHTML = "<p>No matching data found in any sheets.</p>";
       }
-      
-      container.innerHTML = outputHTML;
     }
-    
-    // Initialize Tabletop once the page's DOM is fully loaded.
-    window.addEventListener('DOMContentLoaded', init);
   </script>
 </body>
 </html>
