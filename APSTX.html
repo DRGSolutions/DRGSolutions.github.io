@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>APS TX - Active Projects Search</title>
   <style>
-    /* Basic reset and base styling matching index.html */
+    /* Basic reset and styling matching index.html */
     * {
       margin: 0;
       padding: 0;
@@ -55,16 +55,23 @@
     // URL of the published CSV from your Google Sheet.
     const csvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQLes4p_pzZFdK0P4DjMuZCjTynqO4LXn-bxTQ03Jh0x_775H3ch2qHRDBAQ0v7yFWdL1uQA5p2AdXj/pub?output=csv";
     
-    // Fetch the CSV file.
-    fetch(csvUrl)
-      .then(response => response.text())
-      .then(csvText => {
-          // Parse CSV using SheetJS.
+    // Use AllOrigins as a CORS proxy
+    const proxyUrl = "https://api.allorigins.hexocode.repl.co/get?disableCache=true&url=";
+    const fetchUrl = proxyUrl + encodeURIComponent(csvUrl);
+    
+    fetch(fetchUrl)
+      .then(response => {
+          if (!response.ok) {
+              throw new Error("Network response was not ok");
+          }
+          return response.json();
+      })
+      .then(data => {
+          // data.contents holds the CSV text
+          const csvText = data.contents;
           const workbook = XLSX.read(csvText, { type: 'string' });
-          // Since it's a CSV, there's typically one sheet.
           const sheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[sheetName];
-          // Convert the sheet to a 2D array where the first row is the header.
           const sheetData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
           processSheetData(sheetData);
       })
