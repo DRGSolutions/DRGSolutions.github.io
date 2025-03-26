@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>APS TX - Active Projects Search</title>
+  <style>
+    /* Reset and base styling */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    }
+    /* Background gradient and centered content */
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: linear-gradient(135deg, #74ABE2, #5563DE);
+      color: #fff;
+    }
+    /* Container styling */
+    .container {
+      text-align: center;
+      width: 80%;
+      max-width: 800px;
+    }
+    /* Styling for each result block */
+    .result {
+      background-color: rgba(255, 255, 255, 0.1);
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 8px;
+    }
+    hr {
+      border: 0;
+      height: 1px;
+      background: rgba(255,255,255,0.3);
+    }
+  </style>
+  <!-- Load Tabletop.js library from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/tabletop@1.5.1/src/tabletop.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>APS (Active Projects Search) TX</h1>
+    <div id="results">
+      <p>Loading data from spreadsheet...</p>
+    </div>
+  </div>
+  <script>
+    // This function initializes Tabletop to load the spreadsheet.
+    // Ensure your spreadsheet is published or shared appropriately.
+    function init() {
+      Tabletop.init({
+        key: '1mwRKCktMmcoKXwx8_BEfWGdNKCdtyB1zBP-4c1kF460',
+        callback: processData,
+        simpleSheet: false, // we want data from all sheets
+        debug: false
+      });
+    }
+    
+    // Process the data once loaded from the spreadsheet.
+    function processData(data, tabletop) {
+      var container = document.getElementById("results");
+      var outputHTML = "";
+      
+      // Loop through each sheet in the spreadsheet.
+      for (var sheetName in data) {
+        // Tabletop returns each sheet's data as an array.
+        var sheetData = data[sheetName].elements ? data[sheetName].elements : data[sheetName];
+        if (sheetData.length > 0) {
+          // Check if the sheet has a "Current Responsibility" header.
+          var headers = Object.keys(sheetData[0]);
+          if (headers.indexOf("Current Responsibility") !== -1) {
+            sheetData.forEach(function(row) {
+              // Filter rows where "Current Responsibility" includes "joe komodi" (case-insensitive).
+              if (row["Current Responsibility"] && row["Current Responsibility"].toLowerCase().includes("joe komodi")) {
+                // Get Column D value by assuming it is the 4th column.
+                var keys = Object.keys(row);
+                var colD = keys.length >= 4 ? row[keys[3]] : "";
+                // Get Current Status.
+                var currentStatus = row["Current Status"] ? row["Current Status"] : "";
+                // Get the latest comment and comment date (adjust these keys if necessary).
+                var latestComment = row["Latest Comment"] ? row["Latest Comment"] : "";
+                var commentDate = row["Comment Date"] ? row["Comment Date"] : "";
+                
+                outputHTML += "<div class='result'>";
+                outputHTML += "<p><strong>Current Responsibility:</strong> " + row["Current Responsibility"] + "</p>";
+                outputHTML += "<p><strong>Column D:</strong> " + colD + "</p>";
+                outputHTML += "<p><strong>Current Status:</strong> " + currentStatus + "</p>";
+                outputHTML += "<p><strong>Latest Comment:</strong> " + latestComment + (commentDate ? " (" + commentDate + ")" : "") + "</p>";
+                outputHTML += "</div><hr/>";
+              }
+            });
+          }
+        }
+      }
+      
+      if(outputHTML === ""){
+         outputHTML = "<p>No matching data found.</p>";
+      }
+      
+      container.innerHTML = outputHTML;
+    }
+    
+    // Initialize Tabletop once the page's DOM is fully loaded.
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+</body>
+</html>
