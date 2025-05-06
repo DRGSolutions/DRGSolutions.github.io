@@ -121,7 +121,12 @@
       reader.onload = e => {
         try {
           const rows = parseCSV(e.target.result);
+          // header validation
           if (!rows.length) throw new Error('No data found in CSV.');
+          const keys = Object.keys(rows[0]);
+          if (!keys.includes('SCID') || !keys.includes('Make ready notes')) {
+            throw new Error('CSV must include columns: SCID, Make ready notes.');
+          }
           renderOutput(rows);
         } catch(err) {
           errorDiv.textContent = 'Error: ' + err.message;
@@ -136,6 +141,7 @@
     // --- Render & Classify ---
     function renderOutput(rows) {
       const outputDiv = document.getElementById('output');
+      let wrote = false;
       rows.forEach(row => {
         const scid  = row['SCID'];
         const notes = row['Make ready notes'] || '';
@@ -150,6 +156,7 @@
         }
         if (!moves.length) return;
 
+        wrote = true;
         const {lines,power,comm,rep,sec} = classifyScid(notes, moves);
         const total = power + comm;
 
@@ -168,11 +175,14 @@
         else if (rep)                       level = 'COMPLEX POWER MR';
         else if (power > 0 && comm === 0) {
           level = (power <= 2000 && !sec) ? 'SIMPLE POWER MR' : 'COMPLEX POWER MR';
-        } else                              level = 'COMPLEX POWER MR';
+        } else level = 'COMPLEX POWER MR';
 
         outputDiv.innerHTML += `<div class="mr-level">MR LEVEL: ${level}</div>`;
         outputDiv.innerHTML += `<hr>`;
       });
+      if (!wrote) {
+        outputDiv.innerHTML = '<div>No raise/lower operations detected.</div>';
+      }
     }
 
     function classifyScid(notes, moves) {
