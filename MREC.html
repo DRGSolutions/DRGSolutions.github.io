@@ -5,7 +5,69 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DRG SOLUTIONS - MR Cost Estimator</title>
   <style>
-    /* ... your existing styles ... */
+    /* Reset & base */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: linear-gradient(135deg, #74ABE2, #5563DE);
+      color: #fff;
+      padding: 40px;
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+      text-align: center;
+    }
+    .button, input[type="file"] {
+      display: inline-block;
+      background-color: rgba(255,255,255,0.2);
+      border: 2px solid #fff;
+      border-radius: 50px;
+      padding: 15px 30px;
+      font-size: 1.1em;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      margin: 10px 5px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+      text-decoration: none;
+    }
+    .button:hover, input[type="file"]:hover {
+      background-color: rgba(255,255,255,0.3);
+      transform: translateY(-3px);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+    }
+    #error {
+      margin-top: 20px;
+      color: #ff6961;
+      font-weight: bold;
+    }
+    #output {
+      margin-top: 20px;
+      text-align: left;
+      background: rgba(255,255,255,0.1);
+      padding: 20px;
+      border-radius: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-family: Consolas, monospace;
+      font-size: 0.9em;
+      line-height: 1.4;
+    }
+    .mr-level {
+      font-weight: bold;
+      margin-top: 10px;
+      color: #FFD700;
+    }
+    hr {
+      border-color: rgba(255,255,255,0.2);
+      margin: 15px 0;
+    }
   </style>
 </head>
 <body>
@@ -18,32 +80,37 @@
   </div>
 
   <script>
-    // --- Constants & Keywords (unchanged) ---
-    const DEFAULT_CLEARANCE = 1000;
-    const COMM_DROP         = 500;
-    const FULL_POWER = { /* ... */ };
-    const RISER_ONLY = {1:5000,3:10000};
-    const COMM_KEYWORDS   = ['fiber','telecom','catv','communication'];
-    const EQUIP_KEYWORDS  = ['transformer','arrestor'];
-    const POWER_WIRE_KEY  = 'primary';
-    const RISER_KEYWORD   = 'riser';
+    // Constants & pricing
+    const DEFAULT_CLEARANCE_COST = 1000;
+    const COMM_DROP_COST = 500;
+    const FULL_POWER_PRICING = {
+      1: { no_equip:4000, equip:5000, guy:6700 },
+      2: { no_equip:5000, equip:6000, guy:7700 },
+      3: { no_equip:6800, equip:7800, guy:9500 },
+      4: { no_equip:8450, equip:9450, guy:13950 }
+    };
+    const RISER_PRICING = { 1:5000, 3:10000 };
+    const COMM_KEYWORDS  = ['fiber','telecom','catv','communication'];
+    const EQUIP_KEYWORDS = ['transformer','arrestor'];
+    const POWER_WIRE_KEY = 'primary';
+    const RISER_KEYWORD  = 'riser';
 
-    // --- EXACT same regex as Python ADJUST_RE: requires Lower/Raise and "to" ---
-    const ADJUST_RE = /(.+?)\s+at\s+(\d+)'-(\d+)"\s*:\s*(Lower|Raise)\s+\d+"\s+to\s+(\d+)'-(\d+)"/ig;
-
+    // CSV parsing
     function parseCSV(text) {
-      const lines  = text.trim().split(/\r?\n/);
+      const lines = text.trim().split(/\r?\n/);
       const header = lines.shift().split(',');
       return lines.map(line => {
         const cols = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
                         .map(s => s.replace(/^"|"$/g,''));
-        const obj  = {};
-        header.forEach((h,i)=> obj[h.trim()] = (cols[i]||'').trim());
+        const obj = {};
+        header.forEach((h,i) => obj[h.trim()] = (cols[i]||'').trim());
         return obj;
       });
     }
 
-    // ——— Now faithfully matching Python parse_adjustments() ———
+    // Exact regex from Python ADJUST_RE: only Lower/Raise ... to ...
+    const ADJUST_RE = /(.+?)\s+at\s+(\d+)'-(\d+)"\s*:\s*(Lower|Raise)\s+\d+"\s+to\s+(\d+)'-(\d+)"/ig;
+
     function parseAdjustments(notes) {
       const moves = [];
       ADJUST_RE.lastIndex = 0;
@@ -58,10 +125,9 @@
       return moves;
     }
 
-    // ——— classifyScid unchanged from before but using parseAdjustments() ———
     function classifyScid(notes, moves) {
       const real = moves.filter(m => !/proposed/i.test(m.desc));
-      const nl   = (notes||'').toLowerCase();
+      const nl = (notes||'').toLowerCase();
       const replacement_flag = nl.includes('pole top:') && nl.includes('replace');
       const secondary_flag   = real.some(m => m.desc.toLowerCase().includes('secondary'));
       const lines = [];
@@ -78,31 +144,31 @@
         );
         const has_guy = real.some(m => /down guy/i.test(m.desc));
         const cat = has_guy ? 'guy' : has_equip ? 'equip' : 'no_equip';
-        const p_cost = FULL_POWER[phase][cat];
+        const p_cost = FULL_POWER_PRICING[phase][cat];
         power += p_cost;
-        lines.push(`Pole replacement (phase ${phase}, ${cat.replace('_',' ')}): \$${p_cost.toLocaleString()}`);
+        lines.push(`Pole replacement (phase ${phase}, ${cat.replace('_',' ')}): $${p_cost.toLocaleString()}`);
+
         real.forEach(m => {
           const dl = m.desc.toLowerCase();
           if (dl.includes('com drop')) {
-            comm += COMM_DROP;
-            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP}`);
+            comm += COMM_DROP_COST;
+            lines.push(`Comm drop (${m.desc}): $${COMM_DROP_COST.toLocaleString()}`);
           } else if (COMM_KEYWORDS.some(kw => dl.includes(kw))) {
-            comm += DEFAULT_CLEARANCE;
-            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE}`);
+            comm += DEFAULT_CLEARANCE_COST;
+            lines.push(`Comm cable move (${m.desc}): $${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
           }
         });
+
         real.forEach(m => {
-          if (/down guy/i.test(m.desc)) {
-            lines.push(`${m.desc}: no charge`);
-          }
+          if (/down guy/i.test(m.desc)) lines.push(`${m.desc}: no charge`);
         });
       }
       else if (real.length && real.every(m => m.desc.toLowerCase().includes(RISER_KEYWORD))) {
         const cnt = real.length;
         const phase = [1,3].includes(cnt) ? cnt : 1;
-        const p_cost = RISER_ONLY[phase] || DEFAULT_CLEARANCE;
+        const p_cost = RISER_PRICING[phase] || DEFAULT_CLEARANCE_COST;
         power += p_cost;
-        lines.push(`${phase}-Phase Primary Riser only: \$${p_cost.toLocaleString()}`);
+        lines.push(`${phase}-Phase Primary Riser only: $${p_cost.toLocaleString()}`);
       }
       else {
         real.forEach(m => {
@@ -111,19 +177,19 @@
             lines.push(`${m.desc}: included in secondary move`);
           }
           else if (dl.includes('com drop')) {
-            comm += COMM_DROP;
-            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP}`);
+            comm += COMM_DROP_COST;
+            lines.push(`Comm drop (${m.desc}): $${COMM_DROP_COST.toLocaleString()}`);
           }
           else if (COMM_KEYWORDS.some(kw => dl.includes(kw))) {
-            comm += DEFAULT_CLEARANCE;
-            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE}`);
+            comm += DEFAULT_CLEARANCE_COST;
+            lines.push(`Comm cable move (${m.desc}): $${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
           }
           else if (/down guy/i.test(dl)) {
             lines.push(`${m.desc}: no charge`);
           }
           else {
-            power += DEFAULT_CLEARANCE;
-            lines.push(`${m.desc}: clearance = \$${DEFAULT_CLEARANCE}`);
+            power += DEFAULT_CLEARANCE_COST;
+            lines.push(`${m.desc}: clearance = $${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
           }
         });
       }
@@ -131,12 +197,11 @@
       return { lines, power, comm, replacement_flag, secondary_flag };
     }
 
-    // ——— Wire up button exactly as before ———
     document.getElementById('processBtn').addEventListener('click', () => {
       const errorDiv  = document.getElementById('error');
       const outputDiv = document.getElementById('output');
       errorDiv.textContent = '';
-      outputDiv.innerHTML  = '';
+      outputDiv.innerHTML = '';
 
       const fileInput = document.getElementById('csvFile');
       if (!fileInput.files[0]) {
@@ -160,8 +225,9 @@
             const moves = parseAdjustments(notes);
             if (!moves.length) return;
             found = true;
+
             const { lines, power, comm, replacement_flag, secondary_flag } =
-                  classifyScid(notes, moves);
+              classifyScid(notes, moves);
             const total = power + comm;
 
             outputDiv.innerHTML += `<div>SCID ${scid}:</div>`;
