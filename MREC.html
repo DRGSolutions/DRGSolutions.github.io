@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DRG SOLUTIONS - MR Cost Estimator</title>
+  <style>
+    /* Reset & base */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      background: linear-gradient(135deg, #74ABE2, #5563DE);
+      color: #fff;
+      padding: 40px;
+    }
+    .container {
+      width: 100%;
+      max-width: 800px;
+      text-align: center;
+    }
+    .button, input[type="file"] {
+      display: inline-block;
+      background-color: rgba(255, 255, 255, 0.2);
+      border: 2px solid #fff;
+      border-radius: 50px;
+      padding: 15px 30px;
+      font-size: 1.1em;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      transition: all 0.3s ease;
+      cursor: pointer;
+      margin: 10px 5px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      text-decoration: none;
+    }
+    .button:hover, input[type="file"]:hover {
+      background-color: rgba(255, 255, 255, 0.3);
+      transform: translateY(-3px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+    }
+    #output {
+      margin-top: 30px;
+      text-align: left;
+      background: rgba(255,255,255,0.1);
+      padding: 20px;
+      border-radius: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+      font-family: Consolas, monospace;
+      font-size: 0.9em;
+      line-height: 1.4;
+    }
+    .mr-level { font-weight: bold; margin-top: 10px; color: #FFD700; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>MR Cost Estimator</h1>
+    <input type="file" id="csvFile" accept=".csv" class="button"><br>
+    <button id="processBtn" class="button">Calculate MR Cost</button>
+    <div id="output"></div>
+  </div>
+
+  <script>
+    // CSV parsing (simple)
+    function parseCSV(text) {
+      const lines = text.trim().split(/\r?\n/);
+      const headers = lines.shift().split(',');
+      return lines.map(line => {
+        const cols = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(s => s.replace(/^"|"$/g,''));
+        const obj = {};
+        headers.forEach((h,i)=> obj[h.trim()] = cols[i]?.trim()||'');
+        return obj;
+      });
+    }
+
+    // Regex for Lower/Raise
+    const adjustRe = /(.+?)\s+at\s+(\d+)'-(\d+)"\s*:\s*(Lower|Raise)\s+\d+"\s+to\s+(\d+)'-(\d+)"/ig;
+
+    // Pricing tables
+    const DEFAULT_CLEARANCE = 1000;
+    const COMM_DROP = 500;
+    const FULL_POWER = {
+      1:{no_equip:4000, equip:5000, guy:6700},
+      2:{no_equip:5000, equip:6000, guy:7700},
+      3:{no_equip:6800, equip:7800, guy:9500},
+      4:{no_equip:8450, equip:9450, guy:13950}
+    };
+    const RISER_ONLY = {1:5000, 3:10000};
+
+    document.getElementById('processBtn').addEventListener('click', ()=>{
+      const fileInput = document.getElementById('csvFile');
+      if(!fileInput.files[0]) return alert('Please select a CSV first.');
+      const reader = new FileReader();
+      reader.onload = e => {
+        const rows = parseCSV(e.target.result);
+        renderOutput(rows);
+      };
+      reader.readAsText(fileInput.files[0]);
+    });
+
+    function renderOutput(rows) {
+      const out = document.getElementById('output');
+      out.innerHTML = '';
+      rows.forEach(row => {
+        const scid = row['SCID'];
+        const notes = row['Make ready notes'] || '';
+        const moves = [];
+        let m;
+        while((m = adjustRe.exec(notes)) !== null) {
+          moves.push({desc:m[1].trim(), old: +m[2]*12+ +m[3], new: +m[5]*12+ +m[6]});
+        }
+        if(!moves.length) return;
+        const {lines,power,comm,rep,sec} = classifyScid(notes, moves);
+        const total = power+comm;
+        out.innerHTML += `<div>SCID ${scid}:</div>`;
+        lines.forEach(l=>{
+          out.innerHTML += `<div style="padding-left:20px;">${l}</div>`;
+        });
+        out.innerHTML += `<div style="padding-left:20px;">Power: \$${power.toLocaleString()}</div>`;
+        out.innerHTML += `<div style="padding-left:20px;">Comm:  \$${comm.toLocaleString()}</div>`;
+        out.innerHTML += `<div style="padding-left:20px;">Total: \$${total.toLocaleString()}</div>`;
+        // MR LEVEL
+        let level;
+        if(total===0) level='NO MR';
+        else if(power===0 && comm>0) level='COMM MR';
+        else if(rep) level='COMPLEX POWER MR';
+        else if(power>0 && comm===0) {
+          level = (power<=2000 && !sec) ? 'SIMPLE POWER MR' : 'COMPLEX POWER MR';
+        } else level='COMPLEX POWER MR';
+        out.innerHTML += `<div class="mr-level">MR LEVEL: ${level}</div>`;
+        out.innerHTML += `<hr style="border-color:rgba(255,255,255,0.2); margin:10px 0;">`;
+      });
+    }
+
+    function classifyScid(notes, moves) {
+      const real = moves.filter(m=> !/proposed/i.test(m.desc));
+      const nl = notes.toLowerCase();
+      const rep = /pole top:/i.test(nl) && /replace/i.test(nl);
+      const sec = real.some(m=> /secondary/i.test(m.desc.toLowerCase()));
+      const lines = [];
+      let power=0, comm=0;
+
+      if(rep) {
+        const primCount = real.filter(m=>
+          /primary/i.test(m.desc) && !/riser/i.test(m.desc)
+        ).length;
+        const phase = [1,2,3].includes(primCount)? primCount:4;
+        const hasEquip = real.some(m=> EQUIP_KEYWORDS.some(kw=> m.desc.toLowerCase().includes(kw)));
+        const hasGuy   = real.some(m=> /down guy/i.test(m.desc));
+        const cat = hasGuy?'guy':hasEquip?'equip':'no_equip';
+        power += FULL_POWER[phase][cat];
+        lines.push(`Pole replacement (phase ${phase}, ${cat.replace('_',' ')}): \$${power.toLocaleString()}`);
+        real.forEach(m=>{
+          const dl = m.desc.toLowerCase();
+          if(/com drop/i.test(dl)) {
+            comm += COMM_DROP;
+            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP}`);
+          } else if(COMM_KEYWORDS.some(kw=>dl.includes(kw))) {
+            comm += DEFAULT_CLEARANCE;
+            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE}`);
+          }
+          if(/down guy/i.test(dl)) {
+            lines.push(`${m.desc}: no charge`);
+          }
+        });
+      }
+      else if(real.length && real.every(m=> /riser/i.test(m.desc.toLowerCase()))) {
+        const phase = [1,3].includes(real.length)? real.length:1;
+        power += RISER_ONLY[phase]||DEFAULT_CLEARANCE;
+        lines.push(`${phase}-Phase Primary Riser only: \$${power.toLocaleString()}`);
+      }
+      else {
+        real.forEach(m=>{
+          const dl = m.desc.toLowerCase();
+          if(/com drop/i.test(dl)) {
+            comm += COMM_DROP;
+            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP}`);
+          } else if(COMM_KEYWORDS.some(kw=>dl.includes(kw))) {
+            comm += DEFAULT_CLEARANCE;
+            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE}`);
+          } else if(/down guy/i.test(dl)) {
+            lines.push(`${m.desc}: no charge`);
+          } else {
+            power += DEFAULT_CLEARANCE;
+            lines.push(`${m.desc}: clearance = \$${DEFAULT_CLEARANCE}`);
+          }
+        });
+      }
+
+      return { lines, power, comm, rep, sec };
+    }
+  </script>
+</body>
+</html>
