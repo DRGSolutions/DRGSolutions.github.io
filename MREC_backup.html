@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>DRG SOLUTIONS - MR Cost Estimator</title>
-  <!-- PapaParse for robust CSV parsing -->
+  <!-- PapaParse for CSV parsing -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
   <style>
     /* Reset & base */
@@ -44,21 +44,17 @@
       margin-top:20px; color:#ff6961; font-weight:bold;
     }
     #output {
-      margin-top:20px;
-      text-align:left;
+      margin-top:20px; text-align:left;
       background:rgba(255,255,255,0.1);
-      padding:20px;
-      border-radius:10px;
-      max-height:70vh; /* increased */
-      overflow-y:auto;
+      padding:20px; border-radius:10px;
+      max-height:75vh; overflow-y:auto;
       font-family:Consolas,monospace;
-      font-size:.9em;
-      line-height:1.4;
+      font-size:.9em; line-height:1.4;
     }
-    .scid { font-weight:bold; }
+    .scid { font-weight:bold; margin-top:10px; }
     .mr-level { font-weight:bold; margin-top:10px; }
-    .mr-comm  { color: yellow; }
-    .mr-simple{ color: orange; }
+    .mr-comm   { color: yellow; }
+    .mr-simple { color: orange; }
     .mr-complex{ color: red; }
     hr { border-color:rgba(255,255,255,0.2); margin:15px 0; }
   </style>
@@ -82,184 +78,142 @@
       3:{no_equip:6800,equip:7800,guy:9500},
       4:{no_equip:8450,equip:9450,guy:13950}
     };
-    const RISER_PRICING = {1:5000,3:10000};
-
+    const RISER_PRICING   = {1:5000,3:10000};
     const COMM_KEYWORDS   = ['fiber','telecom','catv','communication'];
-    const EQUIP_KEYWORDS  = ['transformer','arrestor'];
-    const POWER_WIRE_KEY  = 'primary';
+    const EQUIP_KEYWORDS  = ['transformer','arrestor','streetlight','cutout'];
+    const POWER_KEYWORDS  = ['primary','secondary','neutral','drip loop'];
     const RISER_KEYWORD   = 'riser';
 
-    // ─── Exact same regex as Python’s ADJUST_RE ───────────────────────────────
+    // ─── Regex for Lower/Raise ────────────────────────────────────────────────
     const ADJUST_RE = /(.+?)\s+at\s+(\d+)'-(\d+)"\s*:\s*(Lower|Raise)\s+\d+"\s+to\s+(\d+)'-(\d+)"/ig;
 
-    // ─── Parses Lower/Raise moves ─────────────────────────────────────────────
+    // ─── parseAdjustments ─────────────────────────────────────────────────────
     function parseAdjustments(notes) {
       const moves = [];
       ADJUST_RE.lastIndex = 0;
       let m;
       while ((m = ADJUST_RE.exec(notes || '')) !== null) {
-        moves.push({
-          desc: m[1].trim(),
-          old:  parseInt(m[2],10)*12 + parseInt(m[3],10),
-          new:  parseInt(m[5],10)*12 + parseInt(m[6],10)
-        });
+        moves.push({ desc: m[1].trim() });
       }
       return moves;
     }
 
-    // ─── classifyScid exactly as Python ───────────────────────────────────────
+    // ─── classifyScid per Bill’s rules ────────────────────────────────────────
     function classifyScid(notes, moves) {
       const real = moves.filter(m => !/proposed/i.test(m.desc));
       const nl   = (notes||'').toLowerCase();
       const replacement_flag = nl.includes('pole top:') && nl.includes('replace');
-      const secondary_flag   = real.some(m => m.desc.toLowerCase().includes('secondary'));
-      const lines = [];
-      let power=0, comm=0;
+      const isRiserOnly      = real.length > 0 && real.every(m => m.desc.toLowerCase().includes(RISER_KEYWORD));
 
+      const commMoves  = real.filter(m => COMM_KEYWORDS.some(kw => m.desc.toLowerCase().includes(kw)));
+      const powerMoves = real.filter(m => POWER_KEYWORDS.some(kw => m.desc.toLowerCase().includes(kw)));
+      const equipMoves = real.filter(m => EQUIP_KEYWORDS.some(kw => m.desc.toLowerCase().includes(kw)));
+
+      // COMM MR
+      if (commMoves.length && !powerMoves.length && !equipMoves.length && !replacement_flag && !isRiserOnly) {
+        const lines = commMoves.map(m => `${m.desc}: no charge`);
+        return { lines, power:0, comm:0, level:'COMM MR' };
+      }
+
+      // Pole replacement
       if (replacement_flag) {
-        const primary_count = real.filter(m=>
-          m.desc.toLowerCase().includes(POWER_WIRE_KEY) &&
-          !m.desc.toLowerCase().includes(RISER_KEYWORD)
+        let lines = [], power=0;
+        const primary_count = real.filter(m =>
+          m.desc.toLowerCase().includes('primary') && !m.desc.toLowerCase().includes(RISER_KEYWORD)
         ).length;
-        const phase = [1,2,3].includes(primary_count)?primary_count:4;
-        const has_equip = real.some(m=>
-          EQUIP_KEYWORDS.some(kw=>m.desc.toLowerCase().includes(kw))
-        );
-        const has_guy = real.some(m=>/down guy/i.test(m.desc));
-        const cat = has_guy?'guy':has_equip?'equip':'no_equip';
+        const phase = [1,2,3].includes(primary_count) ? primary_count : 4;
+        const hasEquip = equipMoves.length>0;
+        const hasGuy   = real.some(m => /down guy/i.test(m.desc));
+        const cat = hasGuy ? 'guy' : hasEquip ? 'equip' : 'no_equip';
         const p_cost = FULL_POWER_PRICING[phase][cat];
         power += p_cost;
         lines.push(`Pole replacement (phase ${phase}, ${cat.replace('_',' ')}): \$${p_cost.toLocaleString()}`);
-
-        real.forEach(m=>{
-          const dl = m.desc.toLowerCase();
-          if (dl.includes('com drop')) {
-            comm += COMM_DROP_COST;
-            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP_COST.toLocaleString()}`);
-          } else if (COMM_KEYWORDS.some(kw=>dl.includes(kw))) {
-            comm += DEFAULT_CLEARANCE_COST;
-            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
-          }
-        });
-
-        real.forEach(m=>{
-          if (/down guy/i.test(m.desc)) lines.push(`${m.desc}: no charge`);
-        });
-      }
-      else if (real.length && real.every(m=>m.desc.toLowerCase().includes(RISER_KEYWORD))) {
-        const cnt = real.length;
-        const phase = [1,3].includes(cnt)?cnt:1;
-        const p_cost = RISER_PRICING[phase]||DEFAULT_CLEARANCE_COST;
-        power += p_cost;
-        lines.push(`${phase}-Phase Primary Riser only: \$${p_cost.toLocaleString()}`);
-      }
-      else {
-        real.forEach(m=>{
-          const dl = m.desc.toLowerCase();
-          if (dl.includes('drip loop') && secondary_flag && !replacement_flag) {
-            lines.push(`${m.desc}: included in secondary move`);
-          }
-          else if (dl.includes('com drop')) {
-            comm += COMM_DROP_COST;
-            lines.push(`Comm drop (${m.desc}): \$${COMM_DROP_COST.toLocaleString()}`);
-          }
-          else if (COMM_KEYWORDS.some(kw=>dl.includes(kw))) {
-            comm += DEFAULT_CLEARANCE_COST;
-            lines.push(`Comm cable move (${m.desc}): \$${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
-          }
-          else if (/down guy/i.test(dl)) {
-            lines.push(`${m.desc}: no charge`);
-          }
-          else {
-            power += DEFAULT_CLEARANCE_COST;
-            lines.push(`${m.desc}: clearance = \$${DEFAULT_CLEARANCE_COST.toLocaleString()}`);
-          }
-        });
+        commMoves.forEach(m => lines.push(`${m.desc}: no charge`));
+        return { lines, power, comm:0, level:'COMPLEX MR' };
       }
 
-      return { lines, power, comm, replacement_flag, secondary_flag };
+      // Riser-only
+      if (isRiserOnly) {
+        const phase = [1,3].includes(real.length) ? real.length : 1;
+        const p_cost = RISER_PRICING[phase] || DEFAULT_CLEARANCE_COST;
+        return { lines:[`${phase}-Phase Primary Riser only: \$${p_cost.toLocaleString()}`], power:p_cost, comm:0, level:'COMPLEX MR' };
+      }
+
+      // Power/equipment MR
+      let lines=[], power=0, comm=0;
+      if (powerMoves.length) {
+        power += DEFAULT_CLEARANCE_COST;
+        lines.push(`Power wires/drip loop: \$${DEFAULT_CLEARANCE_COST}`);
+      }
+      equipMoves.forEach(m => {
+        power += DEFAULT_CLEARANCE_COST;
+        lines.push(`${m.desc}: equipment = \$${DEFAULT_CLEARANCE_COST}`);
+      });
+      const total = power + comm;
+      const level = total <= 2000 ? 'SIMPLE POWER MR' : 'COMPLEX MR';
+      return { lines, power, comm, level };
     }
 
-    // ─── UI hookup using PapaParse ────────────────────────────────────────────
+    // ─── UI – parse & render ──────────────────────────────────────────────────
     document.getElementById('processBtn').addEventListener('click', ()=>{
-      const errorDiv  = document.getElementById('error');
-      const outputDiv = document.getElementById('output');
-      errorDiv.textContent = '';
-      outputDiv.innerHTML = '';
+      const err = document.getElementById('error');
+      const out = document.getElementById('output');
+      err.textContent = ''; out.innerHTML = '';
 
-      const fileInput = document.getElementById('csvFile');
-      if (!fileInput.files.length) {
-        errorDiv.textContent = 'Error: Please select a CSV file.';
-        return;
+      const fi = document.getElementById('csvFile');
+      if (!fi.files.length) {
+        err.textContent = 'Error: Please select a CSV file.'; return;
       }
 
-      Papa.parse(fileInput.files[0], {
+      Papa.parse(fi.files[0], {
         header: true,
         skipEmptyLines: true,
         complete(results) {
           if (results.errors.length) {
-            errorDiv.textContent = 'CSV Parse Error: ' + results.errors[0].message;
+            err.textContent = 'CSV Parse Error: ' + results.errors[0].message;
             return;
           }
           const rows = results.data;
           if (!rows.length) {
-            errorDiv.textContent = 'Error: No rows in CSV.';
-            return;
+            err.textContent = 'Error: No rows in CSV.'; return;
           }
           const cols = Object.keys(rows[0]);
           if (!cols.includes('SCID') || !cols.includes('Make ready notes')) {
-            errorDiv.textContent = 'Error: CSV must include SCID and Make ready notes.';
-            return;
+            err.textContent = 'Error: CSV must include SCID and Make ready notes.'; return;
           }
 
           let foundAny = false;
           rows.forEach(row => {
-            const scid  = row['SCID'];
+            const scid = row['SCID'];
             const notes = row['Make ready notes'] || '';
             const moves = parseAdjustments(notes);
-            if (!moves.length) return;
+            const replacement_flag = notes.toLowerCase().includes('pole top:') && notes.toLowerCase().includes('replace');
+            // include replacement-only even if no moves
+            if (!moves.length && !replacement_flag) return;
             foundAny = true;
 
-            const { lines, power, comm, replacement_flag, secondary_flag } =
-              classifyScid(notes, moves);
-            const total = power + comm;
+            const { lines, power, comm, level } = classifyScid(notes, moves);
 
-            outputDiv.innerHTML += `<div class="scid">SCID ${scid}:</div>`;
+            out.innerHTML += `<div class="scid">SCID ${scid}:</div>`;
             lines.forEach(l => {
-              outputDiv.innerHTML += `<div style="padding-left:20px;">${l}</div>`;
+              out.innerHTML += `<div style="padding-left:20px;">${l}</div>`;
             });
-            outputDiv.innerHTML += `
+            out.innerHTML += `
               <div style="padding-left:20px;">Power: \$${power.toLocaleString()}</div>
               <div style="padding-left:20px;">Comm:  \$${comm.toLocaleString()}</div>
-              <div style="padding-left:20px;">Total: \$${total.toLocaleString()}</div>
             `;
-
-            let level;
-            if (total === 0) level = 'NO MR';
-            else if (power === 0 && comm > 0) level = 'COMM MR';
-            else if (replacement_flag) level = 'COMPLEX POWER MR';
-            else if (power > 0 && comm === 0) {
-              level = (power <= 2000 && !secondary_flag)
-                ? 'SIMPLE POWER MR'
-                : 'COMPLEX POWER MR';
-            } else level = 'COMPLEX POWER MR';
-
-            // choose color class
-            let cls = '';
-            if (level === 'COMM MR') cls = 'mr-comm';
-            else if (level === 'SIMPLE POWER MR') cls = 'mr-simple';
-            else cls = 'mr-complex';
-
-            outputDiv.innerHTML += 
-              `<div class="mr-level ${cls}">MR LEVEL: ${level}</div><hr>`;
+            const cls = level === 'COMM MR' ? 'mr-comm'
+                      : level === 'SIMPLE POWER MR' ? 'mr-simple'
+                      : 'mr-complex';
+            out.innerHTML += `<div class="mr-level ${cls}">MR LEVEL: ${level}</div><hr>`;
           });
 
           if (!foundAny) {
-            outputDiv.innerHTML = '<div>No raise/lower operations detected.</div>';
+            out.innerHTML = '<div>No raise/lower operations detected.</div>';
           }
         },
-        error(err) {
-          errorDiv.textContent = 'Error reading CSV: ' + err.message;
+        error(err2) {
+          err.textContent = 'Error reading CSV: ' + err2.message;
         }
       });
     });
