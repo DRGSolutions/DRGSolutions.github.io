@@ -86,6 +86,16 @@ def build_map(df, level_cols, cost_cols, warning_cols,
     lats = df['latitude'].astype(float)
     lons = df['longitude'].astype(float)
     m = folium.Map(location=(lats.mean(), lons.mean()), zoom_start=10)
+    # Ensure the map occupies the entire browser window
+    full_css = f"""
+    <style>
+        html, body, #{m.get_name()} {{
+            height: 100%;
+            margin: 0;
+        }}
+    </style>
+    """
+    m.get_root().header.add_child(folium.Element(full_css))
     feature_group = folium.FeatureGroup(name='Markups').add_to(m)
     MarkerCluster(disableClusteringAtZoom=7).add_to(m)
     Draw(export=True, feature_group=feature_group).add_to(m)
