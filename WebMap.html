@@ -217,7 +217,11 @@
 
     function buildLeafletMap(rows, cols, view, markupFile){
       if(map){map.remove();}
-      map=L.map('map');
+      map=L.map('map',{maxZoom:19});
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+        maxZoom:19,
+        attribution:'&copy; OpenStreetMap contributors'
+      }).addTo(map);
       const lats=rows.map(r=>parseFloat(r['latitude']));
       const lons=rows.map(r=>parseFloat(r['longitude']));
       const meanLat=lats.reduce((a,b)=>a+b,0)/lats.length;
