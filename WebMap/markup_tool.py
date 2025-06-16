@@ -198,7 +198,7 @@ def build_map(df, level_cols, cost_cols, warning_cols,
                 'color': 'black',
                 'labelSize': 10,
                 'isJobLabel': True,
-                'opacity': 0.95
+                'opacity': 0.20
             },
             'geometry': {
                 'type': 'Polygon',
@@ -214,7 +214,7 @@ def build_map(df, level_cols, cost_cols, warning_cols,
                 'color': feat['properties'].get('color', 'black'),
                 'fill': False,
                 'weight': 2,
-                'opacity': feat['properties'].get('opacity', 0.95)
+                'opacity': feat['properties'].get('opacity', 0.20)
             }
         ).add_to(m)
         hull_macro = MacroElement()
@@ -262,8 +262,8 @@ def build_map(df, level_cols, cost_cols, warning_cols,
                 style_function=lambda feat: {
                     'color': feat['properties'].get('color', 'blue'),
                     'fillColor': feat['properties'].get('color', 'blue'),
-                    'opacity': feat['properties'].get('opacity', 0.95),
-                    'fillOpacity': feat['properties'].get('opacity', 0.95)
+                    'opacity': feat['properties'].get('opacity', 0.20),
+                    'fillOpacity': feat['properties'].get('opacity', 0.20)
                 }
             ).add_to(m)
             import_macro = MacroElement()
@@ -353,7 +353,7 @@ def build_map(df, level_cols, cost_cols, warning_cols,
         var col = props.color || layer.options.color || 'blue';
         var label = props.label || '';
         var size = props.labelSize || 10;
-        var opacity = props.opacity != null ? props.opacity : (layer.options.opacity != null ? layer.options.opacity : 0.95);
+        var opacity = props.opacity != null ? props.opacity : (layer.options.opacity != null ? layer.options.opacity : 0.20);
         var input = prompt('Color ('+COLORS.join(', ')+'):', col);
         if(input){ col = input; }
         input = prompt('Label (optional):', label);
@@ -388,7 +388,7 @@ def build_map(df, level_cols, cost_cols, warning_cols,
         if(p){
             if(layer.setStyle){
                 var col = p.color || layer.options.color || 'blue';
-                var op = p.opacity != null ? p.opacity : (layer.options.opacity != null ? layer.options.opacity : 0.95);
+                var op = p.opacity != null ? p.opacity : (layer.options.opacity != null ? layer.options.opacity : 0.20);
                 layer.setStyle({color: col, fillColor: col, opacity: op, fillOpacity: op});
             }
             if(p.label){

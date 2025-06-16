@@ -93,7 +93,7 @@
       if(p){
         if(layer.setStyle){
           const col=p.color||layer.options.color||'blue';
-          const op=p.opacity!=null?p.opacity:(layer.options.opacity!=null?layer.options.opacity:0.95);
+          const op=p.opacity!=null?p.opacity:(layer.options.opacity!=null?layer.options.opacity:0.20);
           layer.setStyle({color:col,fillColor:col,opacity:op,fillOpacity:op});
         }
         if(p.label){
@@ -112,7 +112,7 @@
       let col = props.color || layer.options.color || 'blue';
       let label = props.label || '';
       let size = props.labelSize || 10;
-      let opacity = props.opacity!=null?props.opacity:(layer.options.opacity!=null?layer.options.opacity:0.95);
+      let opacity = props.opacity!=null?props.opacity:(layer.options.opacity!=null?layer.options.opacity:0.20);
       const cInput = prompt('Color ('+MARKUP_COLORS.join(', ')+'):', col); if(cInput) col=cInput;
       const lInput = prompt('Label (optional):', label); if(lInput!==null) label=lInput;
       const sInput = prompt('Label size (px):', size); size=parseInt(sInput)||size;
@@ -283,8 +283,8 @@
         if(pts.length<3) return;
         const hull=convexHull(pts); hull.push(hull[0]);
         const latlngs=hull.map(([x,y])=>[y,x]);
-        const poly=L.polygon(latlngs,{color:'black',weight:2,opacity:0.95});
-        poly.feature={type:'Feature',properties:{label:job,color:'black',labelSize:10,isJobLabel:true,opacity:0.95}};
+        const poly=L.polygon(latlngs,{color:'black',weight:2,opacity:0.20});
+        poly.feature={type:'Feature',properties:{label:job,color:'black',labelSize:10,isJobLabel:true,opacity:0.20}};
         featureGroup.addLayer(poly);
         const cx=latlngs.reduce((a,b)=>a+b[1],0)/latlngs.length; // lon
         const cy=latlngs.reduce((a,b)=>a+b[0],0)/latlngs.length; // lat
@@ -298,7 +298,7 @@
         reader.onload=e=>{
           try{
             const data=JSON.parse(e.target.result);
-            const gj=L.geoJSON(data,{style:f=>({color:f.properties.color||'blue',fillColor:f.properties.color||'blue',opacity:f.properties.opacity||0.95,fillOpacity:f.properties.opacity||0.95})});
+            const gj=L.geoJSON(data,{style:f=>({color:f.properties.color||'blue',fillColor:f.properties.color||'blue',opacity:f.properties.opacity||0.20,fillOpacity:f.properties.opacity||0.20})});
             gj.eachLayer(l=>{featureGroup.addLayer(l);});
           }catch(err){alert('Error loading markup: '+err.message);} };
         reader.readAsText(markupFile);
