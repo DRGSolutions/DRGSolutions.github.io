@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet-measure/3.3.0/leaflet-measure.min.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-measure@3.1.0/dist/leaflet-measure.css" />
   <style>
     *{margin:0;padding:0;box-sizing:border-box;} 
     html,body{height:100%;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;}
@@ -37,7 +37,7 @@
   <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-measure/3.3.0/leaflet-measure.min.js"></script>
+  <script src="https://unpkg.com/leaflet-measure@3.1.0/dist/leaflet-measure.js"></script>
   <script>
     const STYLE_COLORS = {
       'No MR':            'green',
@@ -218,16 +218,16 @@
     function buildLeafletMap(rows, cols, view, markupFile){
       if(map){map.remove();}
       map=L.map('map');
-      featureGroup=L.featureGroup().addTo(map);
-      L.markerClusterGroup({disableClusteringAtZoom:7}).addTo(map);
-      new L.Control.Draw({edit:{featureGroup:featureGroup}}).addTo(map);
-      L.control.measure({position:'topleft'}).addTo(map);
-      addControls();
       const lats=rows.map(r=>parseFloat(r['latitude']));
       const lons=rows.map(r=>parseFloat(r['longitude']));
       const meanLat=lats.reduce((a,b)=>a+b,0)/lats.length;
       const meanLon=lons.reduce((a,b)=>a+b,0)/lons.length;
       map.setView([meanLat,meanLon],10);
+      featureGroup=L.featureGroup().addTo(map);
+      L.markerClusterGroup({disableClusteringAtZoom:7}).addTo(map);
+      new L.Control.Draw({edit:{featureGroup:featureGroup}}).addTo(map);
+      L.control.measure({position:'topleft'}).addTo(map);
+      addControls();
 
       let compColor={};
       if(view==='Utility'){
