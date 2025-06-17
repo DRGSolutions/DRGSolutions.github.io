@@ -11,9 +11,9 @@
   <style>
     *{margin:0;padding:0;box-sizing:border-box;} 
     html,body{height:100%;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;}
-    body{display:flex;justify-content:center;align-items:flex-start;background:linear-gradient(135deg,#74ABE2,#5563DE);color:#fff;padding:20px;}
-    .container{width:100%;max-width:900px;text-align:center;}
-    #map{height:70vh;margin-top:20px;border:2px solid #fff;}
+    body{display:flex;flex-direction:column;justify-content:flex-start;align-items:center;background:linear-gradient(135deg,#74ABE2,#5563DE);color:#fff;padding:20px;}
+    .container{width:100%;max-width:900px;text-align:center;display:flex;flex-direction:column;height:100%;}
+    #map{flex:1 1 auto;height:100%;margin-top:20px;border:2px solid #fff;}
     .button,input[type=file]{display:inline-block;background:rgba(255,255,255,0.2);border:2px solid #fff;border-radius:50px;padding:10px 20px;font-size:1em;color:#fff;text-transform:uppercase;letter-spacing:1px;transition:all .3s ease;cursor:pointer;margin:5px;text-decoration:none;}
     .button:hover,input[type=file]:hover{background:rgba(255,255,255,0.3);transform:translateY(-3px);} 
   </style>
@@ -27,8 +27,8 @@
     </div>
     <div style="margin:10px;">
       <input type="file" id="xlsxFile" accept=".xlsx,.xls" class="button" />
-      <input type="file" id="markupFile" accept=".geojson,.json" class="button" />
       <button id="genBtn" class="button">Generate Map</button>
+      <button id="fullBtn" class="button" style="margin-left:10px;">Fullscreen</button>
     </div>
     <div id="map"></div>
   </div>
@@ -190,9 +190,8 @@
       const xfile=document.getElementById('xlsxFile').files[0];
       if(!xfile){alert('Select XLSX');return;}
       const view=document.querySelector('input[name=view]:checked').value;
-      const markupFile=document.getElementById('markupFile').files[0];
       let markupData=null;
-      if(!markupFile && view==='Utility'){
+      if(view==='Utility'){
         try{
           const resp=await fetch(DEFAULT_MARKUP);
           if(resp.ok) markupData=await resp.json();
@@ -206,7 +205,7 @@
       const costCols=columns.filter(c=>c.toLowerCase().includes('mr_cost'));
       const warningCols=columns.filter(c=>c.toLowerCase().includes('warning'));
       const companyCols=columns.filter(c=>c.toLowerCase().includes('company'));
-      buildLeafletMap(rows, {levelCols,costCols,warningCols,companyCols}, view, markupFile, markupData);
+      buildLeafletMap(rows, {levelCols,costCols,warningCols,companyCols}, view, markupData);
     }
 
     function parseXLSX(file){
@@ -242,7 +241,7 @@
       return rows;
     }
 
-    function buildLeafletMap(rows, cols, view, markupFile, markupData){
+    function buildLeafletMap(rows, cols, view, markupData){
       if(map){map.remove();}
       map=L.map('map',{maxZoom:19});
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
@@ -324,11 +323,7 @@
         const gj=L.geoJSON(data,{style:f=>({color:f.properties.color||'blue',fillColor:f.properties.color||'blue',opacity:f.properties.opacity||0.20,fillOpacity:f.properties.opacity||0.20})});
         gj.eachLayer(l=>{featureGroup.addLayer(l);});
       }
-      if(markupFile){
-        const reader=new FileReader();
-        reader.onload=e=>{ try{ addMarkup(JSON.parse(e.target.result)); }catch(err){ alert('Error loading markup: '+err.message); } };
-        reader.readAsText(markupFile);
-      } else if(markupData){
+      if(markupData){
         addMarkup(markupData);
       }
 
@@ -339,6 +334,10 @@
     }
 
     document.getElementById('genBtn').addEventListener('click', generateMap);
+    document.getElementById('fullBtn').addEventListener('click', () => {
+      const elem=document.documentElement;
+      if(elem.requestFullscreen){ elem.requestFullscreen(); }
+    });
   </script>
 </body>
 </html>
