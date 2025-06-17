@@ -1,10 +1,5 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
-try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-    DND_AVAILABLE = True
-except Exception:
-    DND_AVAILABLE = False
 import pandas as pd
 import folium
 from folium.plugins import MarkerCluster, Draw, MeasureControl
@@ -13,11 +8,6 @@ from branca.element import Template, MacroElement
 import webbrowser
 import json
 import re
-import os
-import shutil
-from datetime import datetime
-import http.server
-import threading
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────
 CIRCLE_RADIUS_PIXELS = 6
@@ -37,8 +27,8 @@ PALETTE          = ['blue','darkblue','teal','navy','magenta','lime']
 MULTI_COMP_COLOR = 'red'
 MARKUP_COLORS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'aqua', 'lime', 'black']
 
-# Default markup filename for Utility view
-MARKUP_FILENAME = 'utilmarkupdata.geojson'
+# Path for optional markup file
+markup_file = None
 
 def convex_hull(points):
     pts = sorted(set(points))
@@ -86,16 +76,6 @@ def build_map(df, level_cols, cost_cols, warning_cols,
     lats = df['latitude'].astype(float)
     lons = df['longitude'].astype(float)
     m = folium.Map(location=(lats.mean(), lons.mean()), zoom_start=10)
-    # Ensure the map occupies the entire browser window
-    full_css = f"""
-    <style>
-        html, body, #{m.get_name()} {{
-            height: 100%;
-            margin: 0;
-        }}
-    </style>
-    """
-    m.get_root().header.add_child(folium.Element(full_css))
     feature_group = folium.FeatureGroup(name='Markups').add_to(m)
     MarkerCluster(disableClusteringAtZoom=7).add_to(m)
     Draw(export=True, feature_group=feature_group).add_to(m)
@@ -115,7 +95,7 @@ def build_map(df, level_cols, cost_cols, warning_cols,
                     comps.append(canon(v))
         uniq = sorted(set(comps))
         comp_color = {
-            'Magic Valley Electric Coop': '#98ff98',
+            'Magic Valley Electric Coop': 'forestgreen',
             'AEP': 'orange',
             'Brownsville Public Utilities': 'aqua',
             'Central Bradford PA': 'yellow'
@@ -426,13 +406,6 @@ def build_map(df, level_cols, cost_cols, warning_cols,
         promptEdit(layer);
         {{ this.feature_group.get_name() }}.addLayer(layer);
     });
-    function saveMarkups(){
-        var data = {{ this.feature_group.get_name() }}.toGeoJSON();
-        fetch('save', {method:'POST', body: JSON.stringify(data)});
-    }
-    window.addEventListener('beforeunload', saveMarkups);
-    var ex = document.getElementById('export');
-    if(ex){ ex.addEventListener('click', saveMarkups); }
     {% endmacro %}
     """)
 
@@ -448,32 +421,16 @@ def build_map(df, level_cols, cost_cols, warning_cols,
     m.save(out_html)
     return out_html
 
-def serve_map(html_path, directory):
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=directory, **kwargs)
+def on_load_markup():
+    global markup_file
+    markup_file = filedialog.askopenfilename(
+        title="Select Markup GeoJSON",
+        filetypes=[("GeoJSON", "*.geojson *.json"), ("All Files", "*.*")]
+    )
 
-        def do_POST(self):
-            if self.path == '/save':
-                length = int(self.headers.get('Content-Length', 0))
-                data = self.rfile.read(length)
-                save_path = os.path.join(directory, MARKUP_FILENAME)
-                if os.path.exists(save_path):
-                    backup = f"{save_path}.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
-                    shutil.copy2(save_path, backup)
-                with open(save_path, 'wb') as f:
-                    f.write(data)
-                self.send_response(200)
-                self.end_headers()
-            else:
-                super().do_POST()
 
-    server = http.server.ThreadingHTTPServer(('localhost', 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, server.server_address[1]
-
-def on_generate(xlsx_path=None):
-    path = xlsx_path or filedialog.askopenfilename(title="Select XLSX", filetypes=[("Excel","*.xlsx *.xls")])
+def on_generate():
+    path = filedialog.askopenfilename(title="Select XLSX", filetypes=[("Excel","*.xlsx *.xls")])
     if not path:
         return
     try:
@@ -496,20 +453,13 @@ def on_generate(xlsx_path=None):
         return messagebox.showerror("Missing Company cols", "No company columns found")
 
     view = view_var.get()
-    markup_path = None
-    if view == 'Utility':
-        util_path = os.path.join(os.path.dirname(__file__), MARKUP_FILENAME)
-        if os.path.exists(util_path):
-            markup_path = util_path
     html = build_map(df, level_cols, cost_cols, warning_cols,
-                     company_cols, view, markup_path=markup_path)
-    html_path = os.path.abspath(html)
-    server, port = serve_map(html_path, os.path.dirname(html_path))
-    webbrowser.open_new(f'http://localhost:{port}/{os.path.basename(html_path)}')
+                     company_cols, view, markup_path=markup_file)
+    webbrowser.open(html)
     messagebox.showinfo("Done", f"Map saved to:\n{html}")
 
 if __name__=="__main__":
-    root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
+    root = tk.Tk()
     root.title("MR / Utility Web Map")
     root.geometry("360x200")
 
@@ -518,15 +468,9 @@ if __name__=="__main__":
     tk.Radiobutton(root, text="MR View", variable=view_var, value='MR').pack(anchor='w', padx=20)
     tk.Radiobutton(root, text="Utility View", variable=view_var, value='Utility').pack(anchor='w', padx=20)
 
-    path_var = tk.StringVar()
-    entry = tk.Entry(root, textvariable=path_var)
-    entry.pack(fill='x', padx=10, pady=5)
-    if DND_AVAILABLE:
-        entry.drop_target_register(DND_FILES)
-        entry.dnd_bind('<<Drop>>', lambda e: path_var.set(e.data.strip('{}')))
-    browse = tk.Button(root, text="Browse", command=lambda: path_var.set(filedialog.askopenfilename(title="Select XLSX", filetypes=[("Excel","*.xlsx *.xls")])))
-    browse.pack(fill='x', padx=10, pady=5)
-    tk.Button(root, text="Generate Map", command=lambda:on_generate(path_var.get()))\
+    tk.Button(root, text="Load Markup (GeoJSON)", command=on_load_markup)\
+      .pack(anchor='w', fill='x', padx=10, pady=5)
+    tk.Button(root, text="Load XLSX & Generate Map", command=on_generate)\
       .pack(expand=True, fill='both', padx=10, pady=10)
 
     root.mainloop()
