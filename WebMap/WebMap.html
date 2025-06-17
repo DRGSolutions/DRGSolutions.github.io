@@ -53,6 +53,7 @@
     const MULTI_COMP_COLOR='red';
     const MARKUP_COLORS=['red','orange','yellow','green','blue','purple','aqua','lime','black'];
 
+    const DEFAULT_MARKUP = 'utilmarkupdata.geojson';
     let map, featureGroup, markupsHidden=false, labelsHidden=false;
 
     function firstVal(row, cols){
@@ -164,6 +165,25 @@
         L.DomEvent.on(a,'click',e=>{L.DomEvent.preventDefault(e);toggleMarkups();});
         return div;};
       markupToggle.addTo(map);
+
+      const exportCtrl=L.control({position:'bottomright'});
+      exportCtrl.onAdd=function(){
+        const a=L.DomUtil.create('a','leaflet-bar',null);
+        a.id='export';
+        a.href='#';
+        a.innerHTML='Export';
+        L.DomEvent.on(a,'click',e=>{
+          L.DomEvent.preventDefault(e);
+          const data=featureGroup.toGeoJSON();
+          const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
+          const url=URL.createObjectURL(blob);
+          const link=document.createElement('a');
+          link.href=url; link.download='markups.geojson';
+          link.click();
+          URL.revokeObjectURL(url);
+        });
+        return a;};
+      exportCtrl.addTo(map);
     }
 
     async function generateMap(){
@@ -171,6 +191,13 @@
       if(!xfile){alert('Select XLSX');return;}
       const view=document.querySelector('input[name=view]:checked').value;
       const markupFile=document.getElementById('markupFile').files[0];
+      let markupData=null;
+      if(!markupFile && view==='Utility'){
+        try{
+          const resp=await fetch(DEFAULT_MARKUP);
+          if(resp.ok) markupData=await resp.json();
+        }catch(err){console.warn('No default markup',err);}
+      }
       const data=await parseXLSX(xfile);
       const rows=filterData(data,view);
       if(!rows.length){alert('No valid rows');return;}
@@ -179,7 +206,7 @@
       const costCols=columns.filter(c=>c.toLowerCase().includes('mr_cost'));
       const warningCols=columns.filter(c=>c.toLowerCase().includes('warning'));
       const companyCols=columns.filter(c=>c.toLowerCase().includes('company'));
-      buildLeafletMap(rows, {levelCols,costCols,warningCols,companyCols}, view, markupFile);
+      buildLeafletMap(rows, {levelCols,costCols,warningCols,companyCols}, view, markupFile, markupData);
     }
 
     function parseXLSX(file){
@@ -215,7 +242,7 @@
       return rows;
     }
 
-    function buildLeafletMap(rows, cols, view, markupFile){
+    function buildLeafletMap(rows, cols, view, markupFile, markupData){
       if(map){map.remove();}
       map=L.map('map',{maxZoom:19});
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
@@ -293,15 +320,16 @@
         featureGroup.addLayer(m);
       });
 
+      function addMarkup(data){
+        const gj=L.geoJSON(data,{style:f=>({color:f.properties.color||'blue',fillColor:f.properties.color||'blue',opacity:f.properties.opacity||0.20,fillOpacity:f.properties.opacity||0.20})});
+        gj.eachLayer(l=>{featureGroup.addLayer(l);});
+      }
       if(markupFile){
         const reader=new FileReader();
-        reader.onload=e=>{
-          try{
-            const data=JSON.parse(e.target.result);
-            const gj=L.geoJSON(data,{style:f=>({color:f.properties.color||'blue',fillColor:f.properties.color||'blue',opacity:f.properties.opacity||0.20,fillOpacity:f.properties.opacity||0.20})});
-            gj.eachLayer(l=>{featureGroup.addLayer(l);});
-          }catch(err){alert('Error loading markup: '+err.message);} };
+        reader.onload=e=>{ try{ addMarkup(JSON.parse(e.target.result)); }catch(err){ alert('Error loading markup: '+err.message); } };
         reader.readAsText(markupFile);
+      } else if(markupData){
+        addMarkup(markupData);
       }
 
       map.fitBounds(L.latLngBounds(lats.map((lat,i)=>[lat,lons[i]])));
