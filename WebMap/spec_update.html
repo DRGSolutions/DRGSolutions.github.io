@@ -99,9 +99,13 @@
               <ul>
                 <li>Smart geo‑matching (Haversine) within a configurable radius (default <b>2&nbsp;m</b>).</li>
                 <li>Updates <span class="mono">pole_height</span>, <span class="mono">pole_class</span>, <span class="mono">pole_spec</span>, <span class="mono">proposed_pole_spec</span>, and
-                  <span class="mono">brownsville public utilities_tag</span> (or <span class="mono">text pole_tag</span> if Brownsville tag not present).</li>
+                  <span class="mono">brownsville public utilities_tag</span> (or <span class="mono">text pole_tag</span> if BPU tag not present).</li>
                 <li>“Southern Pine” casing is preserved to match the first sheet.</li>
-                <li>Only <em>changed</em> poles are exported; SCIDs sorted numerically with leading zeros preserved.</li>
+                <li>Export includes only poles that changed and <em>omits</em> the following columns:
+                  <span class="mono">feedback</span>, <span class="mono">pole_owner</span>, <span class="mono">brownsville public utilities_tag</span>,
+                  <span class="mono">make_ready_notes</span>, <span class="mono">time_bucket_start</span>, <span class="mono">time_bucket_stop</span>,
+                  <span class="mono">time_bucket_user</span>, <span class="mono">photo_count</span>, <span class="mono">main_photo</span>, <span class="mono">all_photos</span>.
+                  No Change Log sheet is added to the export.</li>
               </ul>
             </div>
           </div>
@@ -123,7 +127,7 @@
 
         <div class="card">
           <h3>2) Change report</h3>
-          <div id="reportIntro" class="hint">Audit log ordered by <span class="mono">scid</span> (leading zeros preserved).</div>
+          <div id="reportIntro" class="hint">Audit log ordered by <span class="mono">scid</span> (leading zeros preserved). (No log sheet is added to the download.)</div>
           <div class="report" id="report"></div>
         </div>
       </div>
@@ -196,7 +200,7 @@
     drop.addEventListener('drop', e => {
       const items = [...e.dataTransfer.files];
       if (!items.length) return;
-      const f1 = items.find(f => /katapult|admin|brownsville|node attributes/i.test(f.name)) || items[0];
+      const f1 = items.find(f => /katapult|admin|brownsville|node attributes|btx/i.test(f.name)) || items[0];
       const f2 = items.find(f => /pole|selection|map/i.test(f.name)) || items.find(f => f !== f1);
       if (f1) { assignFile(file1, f1); }
       if (f2) { assignFile(file2, f2); }
@@ -233,7 +237,7 @@
         const result = runUpdater(parsedFirst, headerFirst, parsedSecond, headerSecond, tMeters);
         const { updatedRows, changeLog, keptCount, poleCount, candCount, matchCount, headersOut } = result;
 
-        outputWb = buildWorkbook(headersOut, updatedRows, changeLog);
+        outputWb = buildWorkbook(headersOut, updatedRows /*, changeLog */);
 
         s1.textContent = poleCount.toLocaleString();
         s2.textContent = candCount.toLocaleString();
@@ -311,6 +315,20 @@
       fieldTag: ['field_tag','fieldtag','tag','pole_tag','poletag']
     };
 
+    /** Columns to remove from the exported Excel file (case/spacing-insensitive). */
+    const DROP_COLS = [
+      'feedback',
+      'pole_owner',
+      'brownsville public utilities_tag',
+      'make_ready_notes',
+      'time_bucket_start',
+      'time_bucket_stop',
+      'time_bucket_user',
+      'photo_count',
+      'main_photo',
+      'all_photos'
+    ];
+
     function findHeaderKey(headerRow, keyset) {
       const cand = keyset.map(normalizeKey);
       const normMap = new Map(headerRow.map(h => [normalizeKey(h), h]));
@@ -354,21 +372,6 @@
       return Number.isFinite(num) ? num : null;
     }
 
-    function parseCoords(row, header) {
-      const latKey = findHeaderKey(header, KEYSETS.lat);
-      const lonKey = findHeaderKey(header, KEYSETS.lon);
-      const lat = parseNumber(row[latKey]);
-      const lon = parseNumber(row[lonKey]);
-      return { lat, lon, latKey, lonKey };
-    }
-
-    function isPoleRow(row, header) {
-      const nodeKey = findHeaderKey(header, KEYSETS.nodeType);
-      if (!nodeKey) return true;
-      const v = String(row[nodeKey] ?? '').toLowerCase();
-      return v.includes('pole');
-    }
-
     function deg2rad(d){ return d*Math.PI/180; }
     function haversineMeters(lat1, lon1, lat2, lon2) {
       if ([lat1,lon1,lat2,lon2].some(v => !Number.isFinite(v))) return Number.POSITIVE_INFINITY;
@@ -395,6 +398,13 @@
       for (const [style,c] of counts.entries()) { if (c>n || (c===n && style==='SOUTHERN PINE')) { best=style; n=c; } }
       return best || 'SOUTHERN PINE';
     }
+
+    function parsePoleSpec(specStr) {
+      const s = String(specStr || '');
+      const m = s.match(/(\d+)\s*-\s*([A-Za-z0-9]+)\s+southern\s+pine/i);
+      if (!m) return null;
+      return { height: parseInt(m[1], 10), cls: m[2] };
+    }
     function makePoleSpec(height, cls, pineLabel) {
       if (height == null || cls == null || cls === '') return null;
       const h = String(height).trim();
@@ -404,7 +414,21 @@
 
     function safeVal(v) { if (v===null||v===undefined) return ''; return typeof v==='number'? v : String(v); }
     function cloneRow(row){ const o={}; for (const k of Object.keys(row)) o[k]=row[k]; return o; }
-    function normalizeTag(s){ return String(s||'').toUpperCase().replace(/\s+/g,'').trim(); }
+
+    function parseCoords(row, header) {
+      const latKey = findHeaderKey(header, KEYSETS.lat);
+      const lonKey = findHeaderKey(header, KEYSETS.lon);
+      const lat = parseNumber(row[latKey]);
+      const lon = parseNumber(row[lonKey]);
+      return { lat, lon, latKey, lonKey };
+    }
+
+    function isPoleRow(row, header) {
+      const nodeKey = findHeaderKey(header, KEYSETS.nodeType);
+      if (!nodeKey) return true;
+      const v = String(row[nodeKey] ?? '').toLowerCase();
+      return v.includes('pole');
+    }
 
     function runUpdater(firstRows, firstHeader, secondRows, secondHeader, thresholdMeters) {
       const scidKey = findHeaderKey(firstHeader, KEYSETS.scid);
@@ -415,7 +439,7 @@
 
       let poleClassKey1 = findHeaderKey(firstHeader, KEYSETS.poleClass);
       let poleHeightKey1 = findHeaderKey(firstHeader, KEYSETS.poleHeight);
-      const poleSpecKey1 = findHeaderKey(firstHeader, KEYSETS.poleSpec);
+      let poleSpecKey1 = findHeaderKey(firstHeader, KEYSETS.poleSpec);
       const proposedSpecKey1 = findHeaderKey(firstHeader, KEYSETS.proposedPoleSpec);
 
       const poleClassKey2 = findHeaderKey(secondHeader, KEYSETS.poleClass);
@@ -463,7 +487,7 @@
       const missingToAppend = [];
       if (!poleClassKey1) { poleClassKey1 = 'pole_class'; if (!headersOut.includes(poleClassKey1)) missingToAppend.push(poleClassKey1); }
       if (!poleHeightKey1) { poleHeightKey1 = 'pole_height'; if (!headersOut.includes(poleHeightKey1)) missingToAppend.push(poleHeightKey1); }
-      if (!poleSpecKey1 && !headersOut.includes('pole_spec')) headersOut.push('pole_spec'); // ensure we can write pole_spec if absent
+      if (!poleSpecKey1 && !headersOut.includes('pole_spec')) { poleSpecKey1 = 'pole_spec'; headersOut.push('pole_spec'); }
       for (const h of missingToAppend) headersOut.push(h);
 
       const updatedRows = [];
@@ -502,14 +526,14 @@
         const newHeightNum = parseNumber(secondHeight) ?? oldSpec.height ?? parseNumber(firstHeight);
         const newClassStr  = (secondClass || oldSpec.cls || firstClass || '').toString().trim();
 
-        // Choose "Southern Pine" label for this row: use row's own style if present, else global
+        // Choose "Southern Pine" label: use row style if present, else global
         const pineLabelForRow = extractPineCase(oldSpecStr) || pineGlobal;
 
         if (newHeightNum && newClassStr) {
           const newSpecStr = makePoleSpec(newHeightNum, newClassStr, pineLabelForRow);
           const currentSpecStr = poleSpecKey1 ? safeVal(updated[poleSpecKey1]) : '';
           if (!currentSpecStr || currentSpecStr !== newSpecStr) {
-            updated[poleSpecKey1 || 'pole_spec'] = newSpecStr;
+            updated[poleSpecKey1] = newSpecStr;
             changes.push(`pole_spec: ${oldSpecStr||'∅'} → ${newSpecStr}`);
 
             if (proposedSpecKey1) {
@@ -553,7 +577,6 @@
             scidStr, scidNum: Number.isFinite(scidNum) ? scidNum : Number.MAX_SAFE_INTEGER,
             distance: Math.round(match.dist),
             changes,
-            original, updated,
             coords: { fLat, fLon, sLat, sLon }
           });
         }
@@ -572,35 +595,20 @@
       };
     }
 
-    function parsePoleSpec(specStr) {
-      const s = String(specStr || '');
-      const m = s.match(/(\d+)\s*-\s*([A-Za-z0-9]+)\s+southern\s+pine/i);
-      if (!m) return null;
-      return { height: parseInt(m[1], 10), cls: m[2] };
-    }
+    // Build workbook: remove unwanted columns and DO NOT add a log sheet
+    function buildWorkbook(headersOut, rowsOut /* , changeLog */) {
+      const dropSet = new Set(DROP_COLS.map(normalizeKey));
+      const finalHeaders = headersOut.filter(h => !dropSet.has(normalizeKey(h)));
 
-    function buildWorkbook(headersOut, rowsOut, changeLog) {
       const wb = XLSX.utils.book_new();
-      const aoa = [headersOut.slice()];
-      for (const r of rowsOut) aoa.push(headersOut.map(h => r[h] ?? ''));
+      const aoa = [finalHeaders.slice()];
+      for (const r of rowsOut) {
+        aoa.push(finalHeaders.map(h => r[h] ?? ''));
+      }
       const ws1 = XLSX.utils.aoa_to_sheet(aoa);
       XLSX.utils.book_append_sheet(wb, ws1, 'Updated Poles');
 
-      const logHeaders = ['scid', 'change', 'distance_m', 'first_lat', 'first_lon', 'second_lat', 'second_lon'];
-      const logAoa = [logHeaders];
-      for (const entry of changeLog) {
-        if (!entry.changes.length) continue;
-        for (const ch of entry.changes) {
-          logAoa.push([
-            entry.scidStr, ch, entry.distance,
-            entry.coords.fLat ?? '', entry.coords.fLon ?? '',
-            entry.coords.sLat ?? '', entry.coords.sLon ?? ''
-          ]);
-        }
-      }
-      const ws2 = XLSX.utils.aoa_to_sheet(logAoa);
-      XLSX.utils.book_append_sheet(wb, ws2, 'Change Log');
-
+      // No Change Log sheet per requirement
       return wb;
     }
 
@@ -619,7 +627,7 @@
 
         // Badges: detect fields changed
         const cLower = entry.changes.map(c => c.toLowerCase());
-        const hasTag    = cLower.some(c => /\btag:/.test(c)); // catches any "...tag:" label
+        const hasTag    = cLower.some(c => c.includes('tag:')); // robust for "..._tag:"
         const hasSpec   = cLower.some(c => c.startsWith('pole_spec:'));
         const hasHeight = cLower.some(c => c.startsWith('pole_height:'));
         const hasClass  = cLower.some(c => c.startsWith('pole_class:'));
