@@ -41,7 +41,7 @@
     box-shadow: 0 6px 22px rgba(59,130,246,.35), inset 0 1px 0 rgba(255,255,255,.06);
     transition: transform .04s ease, filter .2s ease; }
   .btn:active { transform: translateY(1px); }
-  .btn.secondary { background: #0f141a; border: 1px solid var(--border); color: var(--text); box-shadow: none; }
+  .btn.secondary { background: #0f141a; border: 1px solid var(--border); color: #fff; box-shadow: none; }
   .btn[disabled] { opacity: .5; cursor: not-allowed; }
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; }
   @media (max-width: 900px){ .stats{grid-template-columns: 1fr 1fr;} }
@@ -82,14 +82,13 @@
             <input id="engineFile" type="file" accept=".js" />
           </div>
           <div class="hint" style="margin-top:-6px; margin-bottom:12px;">
-            This page works offline. Place <span class="mono">xlsx.full.min.js</span> next to this HTML file
-            <em>or</em> click “Load Excel Engine (.js)” and select it from your disk. (We’ll also try CDNs if available.)
+            Works offline. Place <span class="mono">xlsx.full.min.js</span> next to this HTML, or click “Load Excel Engine (.js)” to pick it from disk.
           </div>
 
           <h3>1) Upload spreadsheets</h3>
           <div id="drop" class="filebox">
             <div class="file-row">
-              <label for="file1"><strong>Katapult Project Management Admin Report</strong> <span id="name1" class="hint">e.g., <em>Brownsville specs.xlsx</em></span></label>
+              <label for="file1"><strong>Katapult Project Management Admin Report</strong> <span id="name1" class="hint">e.g., <em>BTX-Alice-PT3 test Node Attributes XLSX.xlsx</em></span></label>
               <input id="file1" type="file" accept=".xlsx,.xlsb,.xlsm,.xls" />
             </div>
             <div class="file-row">
@@ -98,9 +97,11 @@
             </div>
             <div class="rules">
               <ul>
-                <li>We use latitude/longitude (Haversine) to match poles within the chosen radius.</li>
-                <li>We update <span class="mono">pole_height</span>, <span class="mono">pole_class</span>, <span class="mono">pole_spec</span>, <span class="mono">proposed_pole_spec</span>, and <span class="mono">text pole_tag</span> per your rules.</li>
-                <li>Only rows where <span class="mono">node_type</span> indicates a pole are considered, and only <em>changed</em> rows remain in the export.</li>
+                <li>Smart geo‑matching (Haversine) within a configurable radius (default <b>2&nbsp;m</b>).</li>
+                <li>Updates <span class="mono">pole_height</span>, <span class="mono">pole_class</span>, <span class="mono">pole_spec</span>, <span class="mono">proposed_pole_spec</span>, and
+                  <span class="mono">brownsville public utilities_tag</span> (or <span class="mono">text pole_tag</span> if Brownsville tag not present).</li>
+                <li>“Southern Pine” casing is preserved to match the first sheet.</li>
+                <li>Only <em>changed</em> poles are exported; SCIDs sorted numerically with leading zeros preserved.</li>
               </ul>
             </div>
           </div>
@@ -122,7 +123,7 @@
 
         <div class="card">
           <h3>2) Change report</h3>
-          <div id="reportIntro" class="hint">Run the process to see the audit log ordered by <span class="mono">scid</span> (leading zeros preserved).</div>
+          <div id="reportIntro" class="hint">Audit log ordered by <span class="mono">scid</span> (leading zeros preserved).</div>
           <div class="report" id="report"></div>
         </div>
       </div>
@@ -135,7 +136,7 @@
   (function(){
     const $ = sel => document.querySelector(sel);
 
-    // ---------- Engine loader (offline-first) ----------
+    // ---------- Excel engine loader (offline-first) ----------
     const engineStatus = $('#engineStatus');
     const engineFile = $('#engineFile');
     const processBtn = $('#process');
@@ -164,39 +165,23 @@
       const cdns  = [
         "https://cdn.jsdelivr.net/npm/xlsx@0.20.2/dist/xlsx.full.min.js",
         "https://unpkg.com/xlsx@0.20.2/dist/xlsx.full.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.2/xlsx.full.min.js",
-        "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+        "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.20.2/xlsx.full.min.js"
       ];
-      // Try local files first (work offline)
-      for (const u of local) {
-        try { const src = await loadScript(u); if (window.XLSX) { setEngineStatus(true, 'local'); return; } } catch(_) {}
-      }
-      // Try CDNs if available
-      for (const u of cdns) {
-        try { const src = await loadScript(u); if (window.XLSX) { setEngineStatus(true, 'CDN'); return; } } catch(_) {}
-      }
+      for (const u of local) { try { await loadScript(u); if (window.XLSX) { setEngineStatus(true, 'local'); return; } } catch(_) {} }
+      for (const u of cdns)  { try { await loadScript(u); if (window.XLSX) { setEngineStatus(true, 'CDN');  return; } } catch(_) {} }
       setEngineStatus(false);
     }
-    // Manual engine loader (no eval; use blob URL)
     engineFile.addEventListener('change', e => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
+      const f = e.target.files && e.target.files[0]; if (!f) return;
       const url = URL.createObjectURL(f);
       loadScript(url).then(() => {
         URL.revokeObjectURL(url);
-        if (window.XLSX) setEngineStatus(true, 'manual upload');
-        else setEngineStatus(false);
-      }).catch(err => {
-        URL.revokeObjectURL(url);
-        setEngineStatus(false);
-        toast(err.message || String(err), true);
-      });
+        if (window.XLSX) setEngineStatus(true, 'manual upload'); else setEngineStatus(false);
+      }).catch(err => { URL.revokeObjectURL(url); setEngineStatus(false); toast(err.message || String(err), true); });
     });
-
-    // Kick off auto load attempts
     ensureXLSX();
 
-    // ---------- App wiring ----------
+    // ---------- App state ----------
     const file1 = $('#file1'), file2 = $('#file2');
     const name1 = $('#name1'), name2 = $('#name2');
     const reportEl = $('#report'), reportIntro = $('#reportIntro');
@@ -211,7 +196,7 @@
     drop.addEventListener('drop', e => {
       const items = [...e.dataTransfer.files];
       if (!items.length) return;
-      const f1 = items.find(f => /katapult|admin|brownsville/i.test(f.name)) || items[0];
+      const f1 = items.find(f => /katapult|admin|brownsville|node attributes/i.test(f.name)) || items[0];
       const f2 = items.find(f => /pole|selection|map/i.test(f.name)) || items.find(f => f !== f1);
       if (f1) { assignFile(file1, f1); }
       if (f2) { assignFile(file2, f2); }
@@ -320,6 +305,8 @@
       proposedPoleSpec: ['proposed_pole_spec','proposedpolespec','proposed pole spec'],
       poleClass: ['pole_class','poleclass','class'],
       poleHeight: ['pole_height','poleheight','height'],
+      // Prefer Brownsville tag when present; fall back to text pole_tag / variants
+      bpuTag: ['brownsville public utilities_tag','brownsville public utilities tag','bpu tag','bpu_tag'],
       textPoleTag: ['text pole_tag','textpoletag','poletag','pole_tag','pole tag','tag','texttag'],
       fieldTag: ['field_tag','fieldtag','tag','pole_tag','poletag']
     };
@@ -328,10 +315,7 @@
       const cand = keyset.map(normalizeKey);
       const normMap = new Map(headerRow.map(h => [normalizeKey(h), h]));
       for (const n of cand) if (normMap.has(n)) return normMap.get(n);
-      for (const h of headerRow) {
-        const hn = normalizeKey(h);
-        if (cand.some(n => hn.includes(n))) return h;
-      }
+      for (const h of headerRow) { const hn = normalizeKey(h); if (cand.some(n => hn.includes(n))) return h; }
       return null;
     }
 
@@ -350,18 +334,12 @@
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
       const header = rows[0].map(v => String(v || ''));
       const dataRows = rows.slice(1);
-      const table = dataRows.map(r => {
-        const obj = {};
-        header.forEach((h, i) => obj[h] = r[i] ?? '');
-        return obj;
-      });
+      const table = dataRows.map(r => { const obj = {}; header.forEach((h, i) => obj[h] = r[i] ?? ''); return obj; });
       return { header, table, sheetName: bestSheetName };
     }
 
     function scoreHeader(headerRow, isFirst) {
-      const need = isFirst
-        ? [KEYSETS.lat, KEYSETS.lon, KEYSETS.textPoleTag]
-        : [KEYSETS.lat, KEYSETS.lon, KEYSETS.fieldTag];
+      const need = isFirst ? [KEYSETS.lat, KEYSETS.lon] : [KEYSETS.lat, KEYSETS.lon, KEYSETS.fieldTag];
       let sc = 0;
       for (const ks of need) if (findHeaderKey(headerRow, ks)) sc += 2;
       if (isFirst && findHeaderKey(headerRow, KEYSETS.scid)) sc += 1;
@@ -400,18 +378,28 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    function parsePoleSpec(specStr) {
-      const s = String(specStr || '').toUpperCase();
-      const m = s.match(/(\d+)\s*-\s*([A-Z0-9]+)\s+SOUTHERN\s+PINE/);
-      if (!m) return null;
-      return { height: parseInt(m[1], 10), cls: m[2] };
+    // ----- SOUTHERN PINE casing preservation -----
+    function extractPineCase(str){
+      const m = String(str || '').match(/southern\s+pine/i);
+      return m ? m[0] : null; // returns the exact case from the match
     }
-
-    function makePoleSpec(height, cls) {
+    function detectGlobalPineStyle(rows, poleSpecKey, proposedSpecKey){
+      const counts = new Map();
+      const add = (s) => { const v = extractPineCase(s); if (v) counts.set(v, (counts.get(v)||0)+1); };
+      for (const r of rows) {
+        if (poleSpecKey) add(r[poleSpecKey]);
+        if (proposedSpecKey) add(r[proposedSpecKey]);
+      }
+      if (!counts.size) return 'SOUTHERN PINE';
+      let best='', n=-1;
+      for (const [style,c] of counts.entries()) { if (c>n || (c===n && style==='SOUTHERN PINE')) { best=style; n=c; } }
+      return best || 'SOUTHERN PINE';
+    }
+    function makePoleSpec(height, cls, pineLabel) {
       if (height == null || cls == null || cls === '') return null;
       const h = String(height).trim();
       const c = String(cls).trim().toUpperCase();
-      return `${h}-${c} SOUTHERN PINE`;
+      return `${h}-${c} ${pineLabel || 'SOUTHERN PINE'}`;
     }
 
     function safeVal(v) { if (v===null||v===undefined) return ''; return typeof v==='number'? v : String(v); }
@@ -420,7 +408,9 @@
 
     function runUpdater(firstRows, firstHeader, secondRows, secondHeader, thresholdMeters) {
       const scidKey = findHeaderKey(firstHeader, KEYSETS.scid);
-      const firstTagKey = findHeaderKey(firstHeader, KEYSETS.textPoleTag) || findHeaderKey(firstHeader, ['poletag']);
+      const bpuTagKey = findHeaderKey(firstHeader, KEYSETS.bpuTag);
+      const fallbackTextTagKey = findHeaderKey(firstHeader, KEYSETS.textPoleTag) || findHeaderKey(firstHeader, ['poletag']);
+      const firstTagKey = bpuTagKey || fallbackTextTagKey; // prefer Brownsville tag when present
       const secondTagKey = findHeaderKey(secondHeader, KEYSETS.fieldTag);
 
       let poleClassKey1 = findHeaderKey(firstHeader, KEYSETS.poleClass);
@@ -442,6 +432,9 @@
         const {lat, lon} = parseCoords(r, secondHeader);
         return { r, lat, lon };
       });
+
+      // Precompute global preferred "Southern Pine" casing for this sheet
+      const pineGlobal = detectGlobalPineStyle(firstRows, poleSpecKey1, proposedSpecKey1);
 
       const matches = new Map();
       let matchCount = 0;
@@ -470,6 +463,7 @@
       const missingToAppend = [];
       if (!poleClassKey1) { poleClassKey1 = 'pole_class'; if (!headersOut.includes(poleClassKey1)) missingToAppend.push(poleClassKey1); }
       if (!poleHeightKey1) { poleHeightKey1 = 'pole_height'; if (!headersOut.includes(poleHeightKey1)) missingToAppend.push(poleHeightKey1); }
+      if (!poleSpecKey1 && !headersOut.includes('pole_spec')) headersOut.push('pole_spec'); // ensure we can write pole_spec if absent
       for (const h of missingToAppend) headersOut.push(h);
 
       const updatedRows = [];
@@ -504,19 +498,17 @@
         }
 
         const oldSpecStr = poleSpecKey1 ? safeVal(original[poleSpecKey1]) : '';
-        const oldSpec = parsePoleSpec(oldSpecStr) || {
-          height: parseNumber(firstHeight),
-          cls: firstClass || null
-        };
-
+        const oldSpec = parsePoleSpec(oldSpecStr) || { height: parseNumber(firstHeight), cls: firstClass || null };
         const newHeightNum = parseNumber(secondHeight) ?? oldSpec.height ?? parseNumber(firstHeight);
         const newClassStr  = (secondClass || oldSpec.cls || firstClass || '').toString().trim();
 
+        // Choose "Southern Pine" label for this row: use row's own style if present, else global
+        const pineLabelForRow = extractPineCase(oldSpecStr) || pineGlobal;
+
         if (newHeightNum && newClassStr) {
-          const newSpecStr = makePoleSpec(newHeightNum, newClassStr);
+          const newSpecStr = makePoleSpec(newHeightNum, newClassStr, pineLabelForRow);
           const currentSpecStr = poleSpecKey1 ? safeVal(updated[poleSpecKey1]) : '';
-          if (!currentSpecStr || currentSpecStr.toUpperCase().trim() !== newSpecStr.toUpperCase().trim()) {
-            if (!poleSpecKey1) { if (!headersOut.includes('pole_spec')) headersOut.push('pole_spec'); }
+          if (!currentSpecStr || currentSpecStr !== newSpecStr) {
             updated[poleSpecKey1 || 'pole_spec'] = newSpecStr;
             changes.push(`pole_spec: ${oldSpecStr||'∅'} → ${newSpecStr}`);
 
@@ -530,8 +522,8 @@
                 }
               } else if (oldPropStr) {
                 const propHeight = Number(newHeightNum) + 5;
-                const newPropStr = makePoleSpec(propHeight, newClassStr);
-                if (newPropStr && oldPropStr.toUpperCase().trim() !== newPropStr.toUpperCase().trim()) {
+                const newPropStr = makePoleSpec(propHeight, newClassStr, pineLabelForRow);
+                if (newPropStr && oldPropStr !== newPropStr) {
                   updated[proposedSpecKey1] = newPropStr;
                   changes.push(`proposed_pole_spec: ${oldPropStr} → ${newPropStr}`);
                 }
@@ -540,12 +532,14 @@
           }
         }
 
+        // Tag update: prefer Brownsville Public Utilities tag column when present
         if (firstTagKey && secondTagKey) {
-          const oldTag = safeVal(original[firstTagKey]).toString().trim();
-          const newTag = safeVal(sr[secondTagKey]).toString().trim();
-          if (newTag && normalizeTag(oldTag) !== normalizeTag(newTag)) {
+          const oldTag = String(safeVal(original[firstTagKey])).trim();
+          const newTag = String(safeVal(sr[secondTagKey])).trim();
+          if (newTag && oldTag !== newTag) {
             updated[firstTagKey] = newTag;
-            changes.push(`text pole_tag: ${oldTag||'∅'} → ${newTag}`);
+            // Show the exact column name in the change log for clarity
+            changes.push(`${firstTagKey}: ${oldTag || '∅'} → ${newTag}`);
           }
         }
 
@@ -576,6 +570,13 @@
         matchCount,
         headersOut
       };
+    }
+
+    function parsePoleSpec(specStr) {
+      const s = String(specStr || '');
+      const m = s.match(/(\d+)\s*-\s*([A-Za-z0-9]+)\s+southern\s+pine/i);
+      if (!m) return null;
+      return { height: parseInt(m[1], 10), cls: m[2] };
     }
 
     function buildWorkbook(headersOut, rowsOut, changeLog) {
@@ -615,7 +616,24 @@
         const det = document.createElement('details'); det.className = 'change';
         const sum = document.createElement('summary');
         const id = escapeHtml(entry.scidStr || '(no scid)');
-        sum.innerHTML = `<strong>SCID <span class="mono">${id}</span></strong> &nbsp; <span class="pill">${entry.distance} m</span>`;
+
+        // Badges: detect fields changed
+        const cLower = entry.changes.map(c => c.toLowerCase());
+        const hasTag    = cLower.some(c => /\btag:/.test(c)); // catches any "...tag:" label
+        const hasSpec   = cLower.some(c => c.startsWith('pole_spec:'));
+        const hasHeight = cLower.some(c => c.startsWith('pole_height:'));
+        const hasClass  = cLower.some(c => c.startsWith('pole_class:'));
+        const hasProp   = cLower.some(c => c.startsWith('proposed_pole_spec:'));
+
+        const badges = [
+          hasTag    ? '<span class="pill">TAG</span>'       : '',
+          hasSpec   ? '<span class="pill">SPEC</span>'      : '',
+          hasHeight ? '<span class="pill">HEIGHT</span>'    : '',
+          hasClass  ? '<span class="pill">CLASS</span>'     : '',
+          hasProp   ? '<span class="pill">PROPOSED</span>'  : ''
+        ].filter(Boolean).join(' ');
+
+        sum.innerHTML = `<strong>SCID <span class="mono">${id}</span></strong> &nbsp; <span class="pill">${entry.distance} m</span> ${badges}`;
         det.appendChild(sum);
 
         const ul = document.createElement('ul'); ul.className = 'chg';
