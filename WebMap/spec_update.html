@@ -56,7 +56,7 @@
     background: rgba(16,185,129,.15); border: 1px solid rgba(16,185,129,.35); color: #a7f3d0; }
   .pill.warn { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.35); color: #fecaca; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-  .rules { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .rules { color: var(--muted); font-size: 13px; }
   footer { margin: 26px 0 60px; color: var(--muted); text-align: center; }
   .engine { display:flex; align-items:center; gap:10px; flex-wrap: wrap; margin-bottom: 10px; }
   .engine .status { padding: 6px 10px; border-radius: 999px; border:1px solid #2b3647; background:#0e1319; }
@@ -101,11 +101,9 @@
                 <li>Updates <span class="mono">pole_height</span>, <span class="mono">pole_class</span>, <span class="mono">pole_spec</span>, <span class="mono">proposed_pole_spec</span>, and
                   <span class="mono">brownsville public utilities_tag</span> (or <span class="mono">text pole_tag</span> if BPU tag not present).</li>
                 <li>“Southern Pine” casing is preserved to match the first sheet.</li>
-                <li>Export includes only poles that changed and <em>omits</em> the following columns:
-                  <span class="mono">feedback</span>, <span class="mono">pole_owner</span>, <span class="mono">brownsville public utilities_tag</span>,
-                  <span class="mono">make_ready_notes</span>, <span class="mono">time_bucket_start</span>, <span class="mono">time_bucket_stop</span>,
-                  <span class="mono">time_bucket_user</span>, <span class="mono">photo_count</span>, <span class="mono">main_photo</span>, <span class="mono">all_photos</span>.
-                  No Change Log sheet is added to the export.</li>
+                <li><strong>Export columns (only):</strong> <span class="mono">scid</span>, <span class="mono">node_type</span>, <span class="mono">pole_class</span>, <span class="mono">pole_height</span>, <span class="mono">pole_spec</span>, <span class="mono">proposed_pole_spec</span>. Everything else is removed.</li>
+                <li>Only <em>changed</em> poles are exported; SCIDs sorted numerically with leading zeros preserved in the on‑page report.</li>
+                <li>No Change Log worksheet is added to the file; the report appears on this page.</li>
               </ul>
             </div>
           </div>
@@ -235,9 +233,9 @@
         parsedSecond = table2; headerSecond = h2;
 
         const result = runUpdater(parsedFirst, headerFirst, parsedSecond, headerSecond, tMeters);
-        const { updatedRows, changeLog, keptCount, poleCount, candCount, matchCount, headersOut } = result;
+        const { updatedRows, changeLog, keptCount, poleCount, candCount, matchCount, colMap } = result;
 
-        outputWb = buildWorkbook(headersOut, updatedRows /*, changeLog */);
+        outputWb = buildWorkbook(colMap, updatedRows);
 
         s1.textContent = poleCount.toLocaleString();
         s2.textContent = candCount.toLocaleString();
@@ -315,20 +313,6 @@
       fieldTag: ['field_tag','fieldtag','tag','pole_tag','poletag']
     };
 
-    /** Columns to remove from the exported Excel file (case/spacing-insensitive). */
-    const DROP_COLS = [
-      'feedback',
-      'pole_owner',
-      'brownsville public utilities_tag',
-      'make_ready_notes',
-      'time_bucket_start',
-      'time_bucket_stop',
-      'time_bucket_user',
-      'photo_count',
-      'main_photo',
-      'all_photos'
-    ];
-
     function findHeaderKey(headerRow, keyset) {
       const cand = keyset.map(normalizeKey);
       const normMap = new Map(headerRow.map(h => [normalizeKey(h), h]));
@@ -381,10 +365,10 @@
       return 2*R*Math.asin(Math.sqrt(a));
     }
 
-    // ----- SOUTHERN PINE casing preservation -----
+    // SOUTHERN PINE casing preservation
     function extractPineCase(str){
       const m = String(str || '').match(/southern\s+pine/i);
-      return m ? m[0] : null; // returns the exact case from the match
+      return m ? m[0] : null;
     }
     function detectGlobalPineStyle(rows, poleSpecKey, proposedSpecKey){
       const counts = new Map();
@@ -431,6 +415,7 @@
     }
 
     function runUpdater(firstRows, firstHeader, secondRows, secondHeader, thresholdMeters) {
+      const nodeKey = findHeaderKey(firstHeader, KEYSETS.nodeType);
       const scidKey = findHeaderKey(firstHeader, KEYSETS.scid);
       const bpuTagKey = findHeaderKey(firstHeader, KEYSETS.bpuTag);
       const fallbackTextTagKey = findHeaderKey(firstHeader, KEYSETS.textPoleTag) || findHeaderKey(firstHeader, ['poletag']);
@@ -457,7 +442,7 @@
         return { r, lat, lon };
       });
 
-      // Precompute global preferred "Southern Pine" casing for this sheet
+      // Preferred "Southern Pine" casing for this sheet
       const pineGlobal = detectGlobalPineStyle(firstRows, poleSpecKey1, proposedSpecKey1);
 
       const matches = new Map();
@@ -483,12 +468,10 @@
         }
       }
 
-      const headersOut = firstHeader.slice();
-      const missingToAppend = [];
-      if (!poleClassKey1) { poleClassKey1 = 'pole_class'; if (!headersOut.includes(poleClassKey1)) missingToAppend.push(poleClassKey1); }
-      if (!poleHeightKey1) { poleHeightKey1 = 'pole_height'; if (!headersOut.includes(poleHeightKey1)) missingToAppend.push(poleHeightKey1); }
-      if (!poleSpecKey1 && !headersOut.includes('pole_spec')) { poleSpecKey1 = 'pole_spec'; headersOut.push('pole_spec'); }
-      for (const h of missingToAppend) headersOut.push(h);
+      // Ensure required columns exist for updates
+      if (!poleClassKey1) { poleClassKey1 = 'pole_class'; }
+      if (!poleHeightKey1) { poleHeightKey1 = 'pole_height'; }
+      if (!poleSpecKey1)   { poleSpecKey1   = 'pole_spec'; }
 
       const updatedRows = [];
       const changeLog = [];
@@ -526,7 +509,7 @@
         const newHeightNum = parseNumber(secondHeight) ?? oldSpec.height ?? parseNumber(firstHeight);
         const newClassStr  = (secondClass || oldSpec.cls || firstClass || '').toString().trim();
 
-        // Choose "Southern Pine" label: use row style if present, else global
+        // Row-preferred "Southern Pine" label, else global
         const pineLabelForRow = extractPineCase(oldSpecStr) || pineGlobal;
 
         if (newHeightNum && newClassStr) {
@@ -556,13 +539,12 @@
           }
         }
 
-        // Tag update: prefer Brownsville Public Utilities tag column when present
+        // Tag update (writes to Brownsville tag if present, else text pole_tag). Not exported.
         if (firstTagKey && secondTagKey) {
           const oldTag = String(safeVal(original[firstTagKey])).trim();
           const newTag = String(safeVal(sr[secondTagKey])).trim();
           if (newTag && oldTag !== newTag) {
             updated[firstTagKey] = newTag;
-            // Show the exact column name in the change log for clarity
             changes.push(`${firstTagKey}: ${oldTag || '∅'} → ${newTag}`);
           }
         }
@@ -584,6 +566,16 @@
 
       changeLog.sort((a,b) => a.scidNum - b.scidNum);
 
+      // Return a column map so the exporter can write EXACTLY the requested 6 columns
+      const colMap = {
+        scid: scidKey || 'scid',
+        node_type: nodeKey || 'node_type',
+        pole_class: poleClassKey1,
+        pole_height: poleHeightKey1,
+        pole_spec: poleSpecKey1,
+        proposed_pole_spec: proposedSpecKey1 || 'proposed_pole_spec'
+      };
+
       return {
         updatedRows,
         changeLog,
@@ -591,24 +583,34 @@
         poleCount: firstFiltered.length,
         candCount: secondFiltered.length,
         matchCount,
-        headersOut
+        colMap
       };
     }
 
-    // Build workbook: remove unwanted columns and DO NOT add a log sheet
-    function buildWorkbook(headersOut, rowsOut /* , changeLog */) {
-      const dropSet = new Set(DROP_COLS.map(normalizeKey));
-      const finalHeaders = headersOut.filter(h => !dropSet.has(normalizeKey(h)));
-
+    // Build workbook with a strict whitelist of columns (and in that exact order)
+    const TARGET_HEADERS = ['scid','node_type','pole_class','pole_height','pole_spec','proposed_pole_spec'];
+    function buildWorkbook(colMap, rowsOut) {
       const wb = XLSX.utils.book_new();
-      const aoa = [finalHeaders.slice()];
+
+      // Header row exactly as requested
+      const aoa = [TARGET_HEADERS.slice()];
+
       for (const r of rowsOut) {
-        aoa.push(finalHeaders.map(h => r[h] ?? ''));
+        const rowOut = [
+          // Always write strings to avoid losing leading zeros in text-like columns.
+          String(r[colMap.scid] ?? ''),
+          String(r[colMap.node_type] ?? ''),
+          String(r[colMap.pole_class] ?? ''),
+          String(r[colMap.pole_height] ?? ''),
+          String(r[colMap.pole_spec] ?? ''),
+          String(r[colMap.proposed_pole_spec] ?? '')
+        ];
+        aoa.push(rowOut);
       }
+
       const ws1 = XLSX.utils.aoa_to_sheet(aoa);
       XLSX.utils.book_append_sheet(wb, ws1, 'Updated Poles');
-
-      // No Change Log sheet per requirement
+      // No Change Log sheet
       return wb;
     }
 
@@ -625,9 +627,8 @@
         const sum = document.createElement('summary');
         const id = escapeHtml(entry.scidStr || '(no scid)');
 
-        // Badges: detect fields changed
         const cLower = entry.changes.map(c => c.toLowerCase());
-        const hasTag    = cLower.some(c => c.includes('tag:')); // robust for "..._tag:"
+        const hasTag    = cLower.some(c => c.includes('tag:'));
         const hasSpec   = cLower.some(c => c.startsWith('pole_spec:'));
         const hasHeight = cLower.some(c => c.startsWith('pole_height:'));
         const hasClass  = cLower.some(c => c.startsWith('pole_class:'));
