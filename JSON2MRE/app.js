@@ -428,9 +428,30 @@ btnGenerate.addEventListener("click", async () => {
     buildGpsPointsSheet(pts, normalized);
 
     // Pole sheets
-    const poleCount = normalized.poles.length;
+    // Sort pole tabs by SCID (lowest → highest) so the workbook tab order is predictable.
+    const extractScidNumber = (scid) => {
+      if (scid == null) return null;
+      const m = String(scid).match(/(\d+)/);
+      if (!m) return null;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const polesSortedByScid = Array.from(normalized.poles || []).sort((a, b) => {
+      const an = extractScidNumber(a && a.scid);
+      const bn = extractScidNumber(b && b.scid);
+      if (an == null && bn == null) {
+        return String((a && a.sheetName) || "").localeCompare(String((b && b.sheetName) || ""), undefined, { numeric: true });
+      }
+      if (an == null) return 1;
+      if (bn == null) return -1;
+      if (an !== bn) return an - bn;
+      return String((a && a.sheetName) || "").localeCompare(String((b && b.sheetName) || ""), undefined, { numeric: true });
+    });
+
+    const poleCount = polesSortedByScid.length;
     for (let i = 0; i < poleCount; i++) {
-      const pole = normalized.poles[i];
+      const pole = polesSortedByScid[i];
       setProgress(65 + Math.floor((i / Math.max(1, poleCount)) * 30), `Writing pole sheets (${i+1}/${poleCount})…`);
       const ws = wb.addWorksheet(pole.sheetName);
       // Match Katapult node color (when available) for the Excel tab color.
