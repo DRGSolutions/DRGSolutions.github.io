@@ -1,0 +1,202 @@
+:root {
+  --bg: #0b1020;
+  --card: #121a33;
+  --text: #e8eefc;
+  --muted: #a6b3d1;
+  --border: rgba(255,255,255,0.10);
+  --primary: #3b82f6;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  background: radial-gradient(1200px 800px at 15% 10%, rgba(59,130,246,0.15), transparent 60%),
+              radial-gradient(900px 600px at 85% 30%, rgba(16,185,129,0.10), transparent 60%),
+              var(--bg);
+  color: var(--text);
+}
+
+.container { max-width: 1100px; margin: 0 auto; padding: 18px; }
+.app-header { border-bottom: 1px solid var(--border); padding: 18px; }
+.app-header__title h1 { margin: 0 0 6px 0; font-size: 20px; }
+.muted { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+
+.card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  margin: 14px 0;
+}
+
+.card h2 { margin: 0 0 10px 0; font-size: 16px; }
+
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.row--tight { margin: 8px 0; }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 260px;
+}
+.field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.options label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+
+button {
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  padding: 9px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+button.primary {
+  background: rgba(59,130,246,0.20);
+  border-color: rgba(59,130,246,0.40);
+}
+button.secondary {
+  background: rgba(16,185,129,0.16);
+  border-color: rgba(16,185,129,0.35);
+}
+button.ghost {
+  background: transparent;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.progress-wrap { width: min(820px, 100%); }
+.progress { height: 8px; background: rgba(255,255,255,0.08); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
+.progress__bar { height: 100%; width: 0%; background: rgba(59,130,246,0.85); transition: width 120ms ease; }
+
+.log {
+  background: rgba(0,0,0,0.30);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  min-height: 180px;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+}
+
+.card--compact { padding: 12px; }
+
+details {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(0,0,0,0.12);
+}
+summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.selection-status {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0,0,0,0.18);
+}
+.selection-status .label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.selection-status .value {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.map {
+  width: 100%;
+  height: 540px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+/* Leaflet theming to match the dark UI */
+.leaflet-control-container .leaflet-control {
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+.leaflet-bar a,
+.leaflet-bar a:hover {
+  background: rgba(18,26,51,0.92);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.leaflet-control-attribution {
+  background: rgba(18,26,51,0.85) !important;
+  color: var(--muted) !important;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 8px;
+  margin: 8px;
+}
+
+/* Always-visible SCID labels (non-interactive) */
+.leaflet-div-icon.scid-label-icon {
+  background: transparent;
+  border: none;
+}
+.scid-label-icon {
+  pointer-events: none;
+}
+.scid-label-text {
+  display: inline-block;
+  /*
+    Leaflet positions marker icons using an inline CSS transform (translate3d).
+    If we apply a transform on the icon container, it will be overridden.
+    Offset the inner label instead so the SCID pill doesn't cover the pole marker.
+  */
+  position: relative;
+  left: 16px;
+  top: -12px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+}
+
+a { color: #93c5fd; }
+.hidden { display: none; }
+
+
+input[type="text"]{
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,0.20);
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 10px;
+  min-width: 220px;
+}
+input[type="text"]::placeholder{
+  color: rgba(166,179,209,0.75);
+}
