@@ -38,6 +38,10 @@ a { color: inherit; }
 .app-header__title h1 { margin: 0 0 6px 0; font-size: 20px; font-weight: 700; letter-spacing: 0.2px; }
 .app-header__title p { margin: 0; line-height: 1.35; }
 
+
+.version-block { margin: 6px 0 8px; line-height: 1.35; }
+.version-block__title { font-weight: 700; color: var(--text); font-size: 13px; margin-bottom: 2px; }
+
 .card {
   background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
   border: 1px solid var(--border);
@@ -318,7 +322,39 @@ button.ghost {
   clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
 }
 
-.marker-icon { background: transparent; border: none; }
+/* Node halo: comm ordering / arrangement issue */
+.legend-swatch--halo {
+  background: transparent;
+  border-radius: 999px;
+  border: 2px solid rgba(250, 204, 21, 0.95);
+  box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.14);
+}
+
+.marker-icon {
+  background: transparent;
+  border: none;
+  /* IMPORTANT: do not override Leaflet's marker positioning.
+     Leaflet sets .leaflet-marker-icon { position: absolute; transform: translate3d(...); }
+     If we change the position here, markers will drift/jitter during scroll/zoom.
+  */
+  overflow: visible;
+}
+
+.marker-icon--halo::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  border: 2px solid rgba(250, 204, 21, 0.95);
+  box-shadow:
+    0 0 0 3px rgba(250, 204, 21, 0.14),
+    0 0 18px rgba(250, 204, 21, 0.22);
+  pointer-events: none;
+}
 .marker-dot {
   width: 14px;
   height: 14px;

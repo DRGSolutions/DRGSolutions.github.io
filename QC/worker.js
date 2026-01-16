@@ -662,22 +662,30 @@ function getMidspanRowType(sectionObj, photoObj) {
 }
 
 function normalizeRowType(raw) {
-  // Normalize ROW strings to a small set that the QC UI can reason about.
+  // Normalize ROW strings to a small set that the QC engine can reason about.
+  //
+  // IMPORTANT: Standards implemented per project requirements:
+  //   - pedestrian: 9' 6" minimum
+  //   - default (includes Driveway / Drive Way / Parking Lot / unmarked): 15' 6" minimum
+  //   - highway and farm: 18' 0" minimum
+  //   - rail (anything containing "rail"): 23' 6" minimum
   const s = String(raw || "").trim().toLowerCase();
   if (!s) return "default";
 
-  // Pedestrian access / sidewalk / trail
-  if (s.includes("ped") || s.includes("sidewalk") || s.includes("trail") || s.includes("walk")) return "pedestrian";
+  // Railroad / rail lines (highest priority): treat anything with the word "rail" as rail.
+  // Examples: "Railroad", "Rail road", "Rail Crossing".
+  if (/\brail/.test(s)) return "rail";
 
   // Highway / interstate / freeway
-  if (s.includes("highway") || s.includes("hwy") || s.includes("interstate") || s.includes("freeway")) return "highway";
-
-  // Railroad/rail lines: treat like highway clearance
-  if (s.includes("rail")) return "highway";
+  if (s.includes("highway") || /\bhwy\b/.test(s) || s.includes("interstate") || s.includes("freeway")) return "highway";
 
   // Farm access
   if (s.includes("farm")) return "farm";
 
+  // Pedestrian access: must explicitly say pedestrian/ped.
+  if (/\bpedestrian\b/.test(s) || /\bped\b/.test(s)) return "pedestrian";
+
+  // Driveway / Parking Lot / anything else defaults to the 15' 6" standard.
   return "default";
 }
 

@@ -30,6 +30,7 @@
       minCommPedestrianIn: 9 * 12 + 6,     // 9' 6"
       minCommHighwayIn: 18 * 12,           // 18' 0"
       minCommFarmIn: 18 * 12,              // 18' 0"
+      minCommRailIn: 23 * 12 + 6,          // 23' 6"
       commSepIn: 4,                        // 4" between comms (NESC-style baseline)
       commToPowerSepIn: 30,                // 30" midspan clearance comm-to-lowest-power
       adssCommToPowerSepIn: 12,            // ADSS midspan comm-to-power min (inches)
@@ -328,7 +329,7 @@
     el.style.height = `${h}px`;
   }
 
-  function makeIcon(status, shape) {
+  function makeIcon(status, shape, hasOrderHalo = false) {
     const st = status || "unknown";
     const sh = shape || "pole";
 
@@ -350,7 +351,7 @@
     }
 
     return L.divIcon({
-      className: "marker-icon",
+      className: hasOrderHalo ? "marker-icon marker-icon--halo" : "marker-icon",
       html,
       iconSize,
       iconAnchor,
@@ -847,8 +848,10 @@
       const marker = poleMarkers.get(poleId);
       if (!marker) continue;
 
-      const st = qcResults && qcResults.poles && qcResults.poles[poleId] ? qcResults.poles[poleId].status : "unknown";
-      marker.setIcon(makeIcon(st, "pole"));
+      const res = qcResults && qcResults.poles ? qcResults.poles[poleId] : null;
+      const st = res && res.status ? res.status : "unknown";
+      const halo = !!(res && res.hasCommOrderIssue);
+      marker.setIcon(makeIcon(st, "pole", halo));
 
       const popupHtml = buildPolePopupHtml(poleId);
       marker.bindPopup(popupHtml, { maxWidth: 420 });
@@ -860,8 +863,10 @@
       const marker = midspanMarkers.get(midId);
       if (!marker) continue;
 
-      const st = qcResults && qcResults.midspans && qcResults.midspans[midId] ? qcResults.midspans[midId].status : "unknown";
-      marker.setIcon(makeIcon(st, "midspan"));
+      const res = qcResults && qcResults.midspans ? qcResults.midspans[midId] : null;
+      const st = res && res.status ? res.status : "unknown";
+      const halo = !!(res && res.hasCommOrderIssue);
+      marker.setIcon(makeIcon(st, "midspan", halo));
 
       const popupHtml = buildMidspanPopupHtml(midId);
       marker.bindPopup(popupHtml, { maxWidth: 420 });
@@ -982,6 +987,31 @@
       for (const iss of res.issues) issues.push(iss);
     }
 
+    // Span comm arrangement check:
+    // Ensure comm ordering in midspans remains consistent with the ordering observed on poles.
+    // This also flags endpoint poles when the ordering reverses across a span.
+    const orderIssues = computeCommOrderIssues(model);
+    for (const iss of orderIssues) {
+      issues.push(iss);
+      if (iss.entityType === "pole") {
+        const r = poleResults[String(iss.entityId)];
+        if (r && Array.isArray(r.issues)) r.issues.push(iss);
+      } else if (iss.entityType === "midspan") {
+        const r = midResults[String(iss.entityId)];
+        if (r && Array.isArray(r.issues)) r.issues.push(iss);
+      }
+    }
+
+    // Recompute statuses now that span-level issues may have been added.
+    for (const r of Object.values(poleResults)) {
+      r.status = deriveStatus(r.issues || []);
+      r.hasCommOrderIssue = !!(r.issues || []).some((i) => String(i.ruleCode || "").startsWith("ORDER.COMM"));
+    }
+    for (const r of Object.values(midResults)) {
+      r.status = deriveStatus(r.issues || []);
+      r.hasCommOrderIssue = !!(r.issues || []).some((i) => String(i.ruleCode || "").startsWith("ORDER.COMM"));
+    }
+
     const summary = summarizeResults(poleResults, midResults, issues);
 
     return {
@@ -1030,6 +1060,392 @@
       message,
       context,
     };
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  //  Span comm arrangement / ordering consistency
+  // ────────────────────────────────────────────────────────────────────────────
+
+  function normalizeOwnerKey(owner) {
+    return String(owner || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "")
+      .trim();
+  }
+
+  function poleDisplayName(pole, fallbackId = "") {
+    if (!pole) return fallbackId || "";
+    return pole.displayName || pole.scid || pole.poleTag || String(pole.poleId || fallbackId || "");
+  }
+
+  function groupCommsOnPole(pole) {
+    // Returns Map(ownerKey -> { owner, heightIn, ids: [] })
+    const groups = new Map();
+    const attsRaw = Array.isArray(pole && pole.attachments) ? pole.attachments : [];
+
+    for (const a of attsRaw) {
+      if (!a) continue;
+      const h = (a.proposedIn != null ? a.proposedIn : a.existingIn);
+      if (h == null) continue;
+
+      const cls = classify(a);
+      if (cls.kind !== "comm") continue;
+      if (cls.isCommDrop) continue;
+
+      const owner = String(cls.owner || "").trim();
+      const key = normalizeOwnerKey(owner);
+      if (!key) continue;
+
+      const id = a.id != null ? String(a.id) : "";
+
+      const prev = groups.get(key);
+      if (!prev) {
+        groups.set(key, { owner, heightIn: Number(h), ids: id ? [id] : [] });
+        continue;
+      }
+
+      if (Number(h) > prev.heightIn) {
+        prev.heightIn = Number(h);
+        prev.ids = id ? [id] : [];
+      } else if (Number(h) === prev.heightIn && id) {
+        prev.ids.push(id);
+      }
+    }
+
+    // Deduplicate IDs
+    for (const g of groups.values()) g.ids = Array.from(new Set(g.ids || []));
+    return groups;
+  }
+
+  function groupCommsOnMidspan(ms) {
+    // Returns Map(ownerKey -> { owner, heightIn, ids: [] })
+    const groups = new Map();
+    const measuresRaw = Array.isArray(ms && ms.measures) ? ms.measures : [];
+
+    for (const m0 of measuresRaw) {
+      if (!m0) continue;
+      const m = { ...m0, category: "Wire" };
+      const h = (m.proposedIn != null ? m.proposedIn : m.existingIn);
+      if (h == null) continue;
+
+      const cls = classify(m);
+      if (cls.kind !== "comm") continue;
+
+      const owner = String(cls.owner || "").trim();
+      const key = normalizeOwnerKey(owner);
+      if (!key) continue;
+
+      const id = m.id != null
+        ? String(m.id)
+        : `${String(m.traceId || "")}|${String(m.wireId || "")}|${String(h)}`;
+
+      const prev = groups.get(key);
+      if (!prev) {
+        groups.set(key, { owner, heightIn: Number(h), ids: id ? [id] : [] });
+        continue;
+      }
+
+      if (Number(h) > prev.heightIn) {
+        prev.heightIn = Number(h);
+        prev.ids = id ? [id] : [];
+      } else if (Number(h) === prev.heightIn && id) {
+        prev.ids.push(id);
+      }
+    }
+
+    // Deduplicate IDs
+    for (const g of groups.values()) g.ids = Array.from(new Set(g.ids || []));
+    return groups;
+  }
+
+  function aboveOwnerKey(groups, k1, k2) {
+    if (!groups) return "";
+    const a = groups.get(k1);
+    const b = groups.get(k2);
+    if (!a || !b) return "";
+    if (a.heightIn == null || b.heightIn == null) return "";
+    if (Number(a.heightIn) === Number(b.heightIn)) return ""; // ambiguous
+    return Number(a.heightIn) > Number(b.heightIn) ? k1 : k2;
+  }
+
+  function idsForPair(groups, k1, k2) {
+    if (!groups) return [];
+    const a = groups.get(k1);
+    const b = groups.get(k2);
+    const out = [];
+    for (const id of (a && a.ids ? a.ids : [])) out.push(String(id));
+    for (const id of (b && b.ids ? b.ids : [])) out.push(String(id));
+    return Array.from(new Set(out.filter(Boolean)));
+  }
+
+  function computeCommOrderIssues(model) {
+    const out = [];
+    const dedupePole = new Set();
+    const dedupeMid = new Set();
+
+    const poles = Array.isArray(model && model.poles) ? model.poles : [];
+    const mids = Array.isArray(model && model.midspanPoints) ? model.midspanPoints : [];
+
+    const poleById = new Map();
+    for (const p of poles) poleById.set(String(p.poleId), p);
+
+    const midById = new Map();
+    for (const m of mids) midById.set(String(m.midspanId), m);
+
+    // Precompute comm grouping for each node.
+    const poleComms = new Map();
+    for (const p of poles) {
+      poleComms.set(String(p.poleId), groupCommsOnPole(p));
+    }
+
+    const midComms = new Map();
+    for (const m of mids) {
+      midComms.set(String(m.midspanId), groupCommsOnMidspan(m));
+    }
+
+    // Build connection index: connectionId -> { aPoleId, bPoleId, midspanIds: [] }
+    const connIndex = new Map();
+
+    const spans = Array.isArray(model && model.spans) ? model.spans : [];
+    for (const s of spans) {
+      if (!s) continue;
+      const cid = s.connectionId != null ? String(s.connectionId) : "";
+      if (!cid) continue;
+      const entry = connIndex.get(cid) || { connectionId: cid, aPoleId: "", bPoleId: "", midspanIds: [] };
+      if (s.aIsPole && s.aNodeId != null) entry.aPoleId = String(s.aNodeId);
+      if (s.bIsPole && s.bNodeId != null) entry.bPoleId = String(s.bNodeId);
+      connIndex.set(cid, entry);
+    }
+
+    for (const m of mids) {
+      const cid = m && m.connectionId != null ? String(m.connectionId) : "";
+      if (!cid) continue;
+      const entry = connIndex.get(cid) || { connectionId: cid, aPoleId: "", bPoleId: "", midspanIds: [] };
+      if (!entry.aPoleId && m.aPoleId) entry.aPoleId = String(m.aPoleId);
+      if (!entry.bPoleId && m.bPoleId) entry.bPoleId = String(m.bPoleId);
+      entry.midspanIds.push(String(m.midspanId));
+      connIndex.set(cid, entry);
+    }
+
+    const addPoleIssue = (poleId, poleName, key, iss) => {
+      if (!poleId) return;
+      if (dedupePole.has(key)) return;
+      dedupePole.add(key);
+      out.push(iss);
+    };
+
+    const addMidIssue = (midId, key, iss) => {
+      if (!midId) return;
+      if (dedupeMid.has(key)) return;
+      dedupeMid.add(key);
+      out.push(iss);
+    };
+
+    for (const entry of connIndex.values()) {
+      const cid = String(entry.connectionId || "");
+      const aId = entry.aPoleId ? String(entry.aPoleId) : "";
+      const bId = entry.bPoleId ? String(entry.bPoleId) : "";
+
+      const aPole = aId ? poleById.get(aId) : null;
+      const bPole = bId ? poleById.get(bId) : null;
+      const aName = poleDisplayName(aPole, aId);
+      const bName = poleDisplayName(bPole, bId);
+
+      const aGroups = aId ? poleComms.get(aId) : null;
+      const bGroups = bId ? poleComms.get(bId) : null;
+
+      // 1) Endpoint pole-to-pole ordering must be consistent for common comm owners.
+      if (aGroups && bGroups && aGroups.size >= 2 && bGroups.size >= 2) {
+        const commonKeys = Array.from(aGroups.keys()).filter((k) => bGroups.has(k));
+        if (commonKeys.length >= 2) {
+          for (const [k1, k2] of pairwise(commonKeys)) {
+            const aboveA = aboveOwnerKey(aGroups, k1, k2);
+            const aboveB = aboveOwnerKey(bGroups, k1, k2);
+            if (!aboveA || !aboveB) continue;
+            if (aboveA === aboveB) continue;
+
+            const pairKey = [k1, k2].sort().join("|");
+
+            const aAboveName = (aGroups.get(aboveA) && aGroups.get(aboveA).owner) ? aGroups.get(aboveA).owner : aboveA;
+            const aBelowKey = (aboveA === k1 ? k2 : k1);
+            const aBelowName = (aGroups.get(aBelowKey) && aGroups.get(aBelowKey).owner) ? aGroups.get(aBelowKey).owner : aBelowKey;
+
+            const bAboveName = (bGroups.get(aboveB) && bGroups.get(aboveB).owner) ? bGroups.get(aboveB).owner : aboveB;
+            const bBelowKey = (aboveB === k1 ? k2 : k1);
+            const bBelowName = (bGroups.get(bBelowKey) && bGroups.get(bBelowKey).owner) ? bGroups.get(bBelowKey).owner : bBelowKey;
+
+            const aIds = idsForPair(aGroups, k1, k2);
+            const bIds = idsForPair(bGroups, k1, k2);
+
+            addPoleIssue(
+              aId,
+              aName,
+              `pole|${aId}|ORDER.COMM.ENDPOINTS|${cid}|${pairKey}`,
+              issue(
+                "FAIL",
+                "pole",
+                aId,
+                aName,
+                "ORDER.COMM.ENDPOINTS",
+                `Comm order is reversed across span ${cid} between this pole and ${bName}: here ${aAboveName} is above ${aBelowName}, but at ${bName} ${bAboveName} is above ${bBelowName}.`,
+                { connectionId: cid, otherPoleId: bId, otherPoleName: bName, owners: [aAboveName, aBelowName], attachmentIds: aIds }
+              )
+            );
+
+            addPoleIssue(
+              bId,
+              bName,
+              `pole|${bId}|ORDER.COMM.ENDPOINTS|${cid}|${pairKey}`,
+              issue(
+                "FAIL",
+                "pole",
+                bId,
+                bName,
+                "ORDER.COMM.ENDPOINTS",
+                `Comm order is reversed across span ${cid} between this pole and ${aName}: here ${bAboveName} is above ${bBelowName}, but at ${aName} ${aAboveName} is above ${aBelowName}.`,
+                { connectionId: cid, otherPoleId: aId, otherPoleName: aName, owners: [bAboveName, bBelowName], attachmentIds: bIds }
+              )
+            );
+          }
+        }
+      }
+
+      // 2) Each midspan photo must preserve the same comm owner ordering as the pole(s).
+      const midspanIds = Array.isArray(entry.midspanIds) ? entry.midspanIds : [];
+      for (const midId0 of midspanIds) {
+        const midId = String(midId0 || "");
+        if (!midId) continue;
+        const ms = midById.get(midId);
+        if (!ms) continue;
+
+        const msGroups = midComms.get(midId);
+        if (!msGroups || msGroups.size < 2) continue;
+
+        const msKeys = Array.from(msGroups.keys());
+        for (const [k1, k2] of pairwise(msKeys)) {
+          const aboveMS = aboveOwnerKey(msGroups, k1, k2);
+          if (!aboveMS) continue;
+
+          const aboveA = aboveOwnerKey(aGroups, k1, k2);
+          const aboveB = aboveOwnerKey(bGroups, k1, k2);
+
+          // Skip if we have no reference order from either pole.
+          if (!aboveA && !aboveB) continue;
+
+          const pairKey = [k1, k2].sort().join("|");
+
+          // If both poles define the pair and they disagree, flag the midspan as an endpoint-order conflict.
+          if (aboveA && aboveB && aboveA !== aboveB) {
+            const aAboveName = (aGroups.get(aboveA) && aGroups.get(aboveA).owner) ? aGroups.get(aboveA).owner : aboveA;
+            const aBelowKey = (aboveA === k1 ? k2 : k1);
+            const aBelowName = (aGroups.get(aBelowKey) && aGroups.get(aBelowKey).owner) ? aGroups.get(aBelowKey).owner : aBelowKey;
+
+            const bAboveName = (bGroups.get(aboveB) && bGroups.get(aboveB).owner) ? bGroups.get(aboveB).owner : aboveB;
+            const bBelowKey = (aboveB === k1 ? k2 : k1);
+            const bBelowName = (bGroups.get(bBelowKey) && bGroups.get(bBelowKey).owner) ? bGroups.get(bBelowKey).owner : bBelowKey;
+
+            addMidIssue(
+              midId,
+              `midspan|${midId}|ORDER.COMM.ENDPOINTS|${cid}|${pairKey}`,
+              issue(
+                "FAIL",
+                "midspan",
+                midId,
+                `Midspan ${midId}`,
+                "ORDER.COMM.ENDPOINTS",
+                `Endpoint poles disagree on comm order across span ${cid} for ${aAboveName}/${aBelowName}. Pole ${aName}: ${aAboveName} above ${aBelowName}; Pole ${bName}: ${bAboveName} above ${bBelowName}.`,
+                { connectionId: cid, aPoleId: aId, bPoleId: bId, aPoleName: aName, bPoleName: bName, owners: [aAboveName, aBelowName], measureIds: idsForPair(msGroups, k1, k2) }
+              )
+            );
+            continue;
+          }
+
+          // Reference order: prefer both poles, otherwise whichever pole defines the pair.
+          let refAbove = "";
+          let refFrom = ""; // "both" | "a" | "b"
+          if (aboveA && aboveB && aboveA === aboveB) {
+            refAbove = aboveA;
+            refFrom = "both";
+          } else if (aboveA) {
+            refAbove = aboveA;
+            refFrom = "a";
+          } else if (aboveB) {
+            refAbove = aboveB;
+            refFrom = "b";
+          }
+          if (!refAbove) continue;
+
+          if (aboveMS === refAbove) continue;
+
+          const refGroups = (refFrom === "b" ? bGroups : aGroups) || aGroups || bGroups;
+          const refAboveName = (refGroups && refGroups.get(refAbove) && refGroups.get(refAbove).owner) ? refGroups.get(refAbove).owner : refAbove;
+          const refBelowKey = (refAbove === k1 ? k2 : k1);
+          const refBelowName = (refGroups && refGroups.get(refBelowKey) && refGroups.get(refBelowKey).owner) ? refGroups.get(refBelowKey).owner : refBelowKey;
+
+          const msAboveName = (msGroups.get(aboveMS) && msGroups.get(aboveMS).owner) ? msGroups.get(aboveMS).owner : aboveMS;
+          const msBelowKey = (aboveMS === k1 ? k2 : k1);
+          const msBelowName = (msGroups.get(msBelowKey) && msGroups.get(msBelowKey).owner) ? msGroups.get(msBelowKey).owner : msBelowKey;
+
+          const severity = (refFrom === "both") ? "FAIL" : "WARN";
+          const refNote = (refFrom === "both")
+            ? "(both poles agree)"
+            : (refFrom === "a")
+              ? `(based on pole ${aName} only)`
+              : `(based on pole ${bName} only)`;
+
+          addMidIssue(
+            midId,
+            `midspan|${midId}|ORDER.COMM.MIDSPAN|${cid}|${pairKey}`,
+            issue(
+              severity,
+              "midspan",
+              midId,
+              `Midspan ${midId}`,
+              "ORDER.COMM.MIDSPAN",
+              `Comm order mismatch in span ${cid}: midspan shows ${msAboveName} above ${msBelowName}, but pole order requires ${refAboveName} above ${refBelowName} ${refNote}.`,
+              { connectionId: cid, aPoleId: aId, bPoleId: bId, aPoleName: aName, bPoleName: bName, owners: [refAboveName, refBelowName], measureIds: idsForPair(msGroups, k1, k2) }
+            )
+          );
+
+          // Also flag the involved pole(s) so the map can quickly highlight the affected span endpoints.
+          if ((refFrom === "both" || refFrom === "a") && aId && aGroups && aGroups.has(k1) && aGroups.has(k2)) {
+            addPoleIssue(
+              aId,
+              aName,
+              `pole|${aId}|ORDER.COMM.MIDSPAN|${cid}|${pairKey}`,
+              issue(
+                severity,
+                "pole",
+                aId,
+                aName,
+                "ORDER.COMM.MIDSPAN",
+                `Comm order mismatch on span ${cid} (midspan ${midId}): expected ${refAboveName} above ${refBelowName}, but midspan shows ${msAboveName} above ${msBelowName}.`,
+                { connectionId: cid, midspanId: midId, otherPoleId: bId, otherPoleName: bName, owners: [refAboveName, refBelowName], attachmentIds: idsForPair(aGroups, k1, k2) }
+              )
+            );
+          }
+
+          if ((refFrom === "both" || refFrom === "b") && bId && bGroups && bGroups.has(k1) && bGroups.has(k2)) {
+            addPoleIssue(
+              bId,
+              bName,
+              `pole|${bId}|ORDER.COMM.MIDSPAN|${cid}|${pairKey}`,
+              issue(
+                severity,
+                "pole",
+                bId,
+                bName,
+                "ORDER.COMM.MIDSPAN",
+                `Comm order mismatch on span ${cid} (midspan ${midId}): expected ${refAboveName} above ${refBelowName}, but midspan shows ${msAboveName} above ${msBelowName}.`,
+                { connectionId: cid, midspanId: midId, otherPoleId: aId, otherPoleName: aName, owners: [refAboveName, refBelowName], attachmentIds: idsForPair(bGroups, k1, k2) }
+              )
+            );
+          }
+        }
+      }
+    }
+
+    return out;
   }
 
   function evaluatePole(pole, rules) {
@@ -1367,6 +1783,7 @@
     if (t === "pedestrian") return rules.midspan.minCommPedestrianIn;
     if (t === "highway") return rules.midspan.minCommHighwayIn;
     if (t === "farm") return rules.midspan.minCommFarmIn;
+    if (t === "rail") return rules.midspan.minCommRailIn;
     return rules.midspan.minCommDefaultIn;
   }
 
@@ -1423,16 +1840,36 @@
         "Midspan ROW type is missing; defaulting to “Default” (15' 6\")."));
     }
 
+
+    const rowTypeNorm = ms.rowType || "default";
+    const rowLabel = String(rowTypeRaw || rowTypeNorm || "default").trim() || (rowTypeNorm || "default");
+    const reqComm = requiredMidspanMinComm(rules, rowTypeNorm);
+
     // Lowest comm height rule
     const comm = measures.filter(m => m._cls.kind === "comm");
+    const power = measures.filter(m => m._cls.kind.startsWith("power_") || m._cls.kind === "power_other");
+
     if (comm.length) {
       const minComm = Math.min(...comm.map(m => m.proposedIn));
-      const req = requiredMidspanMinComm(rules, ms.rowType || "default");
-      if (minComm < req) {
+      if (minComm < reqComm) {
         const offenders = comm.filter(m => m.proposedIn === minComm);
         issues.push(issue("FAIL", "midspan", String(ms.midspanId), msName, "MIDSPAN.MIN_COMM",
-          `Lowest comm at ${fmtFtIn(minComm)} is below the minimum ${fmtFtIn(req)} for ROW type "${ms.rowType || "default"}".`,
-          { minComm, req, rowType: ms.rowType || "default", measureIds: measureIdsOf(offenders) }));
+          `Lowest comm at ${fmtFtIn(minComm)} is below the minimum ${fmtFtIn(reqComm)} for ROW type "${rowLabel}".`,
+          { minComm, req: reqComm, rowType: rowTypeNorm, rowTypeRaw: rowTypeRaw || "", measureIds: measureIdsOf(offenders) }));
+      }
+    }
+
+    // Power-only minimum clearance rule:
+    // If a midspan photo contains ONLY power wires (secondary/neutral/primary/etc.) and NO comms,
+    // the minimum proposed height must be 1' 0" above the comm minimum for that ROW type.
+    if (!comm.length && power.length) {
+      const minPower = Math.min(...power.map(m => m.proposedIn));
+      const reqPower = reqComm + 12;
+      if (minPower < reqPower) {
+        const offenders = power.filter(m => m.proposedIn === minPower);
+        issues.push(issue("FAIL", "midspan", String(ms.midspanId), msName, "MIDSPAN.MIN_POWER_ONLY",
+          `Lowest power at ${fmtFtIn(minPower)} is below the minimum ${fmtFtIn(reqPower)} (1' 0\" above comm minimum) for ROW type "${rowLabel}".`,
+          { minPower, reqPower, reqComm, rowType: rowTypeNorm, rowTypeRaw: rowTypeRaw || "", measureIds: measureIdsOf(offenders) }));
       }
     }
 

@@ -15,6 +15,11 @@
     <div class="container container--wide">
       <div class="app-header__title">
         <h1>Katapult NESC QC Map</h1>
+        <div class="version-block muted">
+          <div class="version-block__title">Version 2.1</div>
+          <div>-Now includes comm ordering violations circled in yellow</div>
+          <div>-Updated midspan ROW logic</div>
+        </div>
         <p class="muted">
           Upload a Katapult Job JSON export to run automated NESC-style vertical clearance checks on poles and midspans.
           Processing is performed locally in your browser.
@@ -114,6 +119,7 @@
             <div class="legend-row"><span class="legend-swatch legend-swatch--warn"></span> Warn</div>
             <div class="legend-row"><span class="legend-swatch legend-swatch--fail"></span> Fail</div>
             <div class="legend-row"><span class="legend-swatch legend-swatch--midspan"></span> Midspan</div>
+            <div class="legend-row"><span class="legend-swatch legend-swatch--halo"></span> Comm arrangement issue</div>
           </div>
 
           <aside id="detailsPanel" class="details-panel" aria-hidden="true">
@@ -981,25 +987,30 @@ function getMidspanRowType(sectionObj, photoObj) {
 }
 
 function normalizeRowType(raw) {
-  // Normalize ROW strings to a small set that the QC UI can reason about.
+  // Normalize ROW strings to a small set that the QC engine can reason about.
+  //
+  // IMPORTANT: Standards implemented per project requirements:
+  //   - pedestrian: 9' 6" minimum
+  //   - default (includes Driveway / Drive Way / Parking Lot / unmarked): 15' 6" minimum
+  //   - highway and farm: 18' 0" minimum
+  //   - rail (anything containing "rail"): 23' 6" minimum
   const s = String(raw || "").trim().toLowerCase();
   if (!s) return "default";
 
-  // Pedestrian access / sidewalk / trail
-  if (s.includes("ped") || s.includes("sidewalk") || s.includes("trail") || s.includes("walk")) return "pedestrian";
+  // Railroad / rail lines (highest priority): treat anything with the word "rail" as rail.
+  // Examples: "Railroad", "Rail road", "Rail Crossing".
+  if (/\brail/.test(s)) return "rail";
 
   // Highway / interstate / freeway
-  if (s.includes("highway") || s.includes("hwy") || s.includes("interstate") || s.includes("freeway")) return "highway";
-
-  // Railroad/rail lines: treat like highway clearance
-  if (s.includes("rail")) return "highway";
-
-  // Railroad (treat as highway clearance bucket)
-  if (s.includes("rail")) return "highway";
+  if (s.includes("highway") || /\bhwy\b/.test(s) || s.includes("interstate") || s.includes("freeway")) return "highway";
 
   // Farm access
   if (s.includes("farm")) return "farm";
 
+  // Pedestrian access: must explicitly say pedestrian/ped.
+  if (/\bpedestrian\b/.test(s) || /\bped\b/.test(s)) return "pedestrian";
+
+  // Driveway / Parking Lot / anything else defaults to the 15' 6" standard.
   return "default";
 }
 
