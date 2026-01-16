@@ -2313,16 +2313,57 @@
   function exportIssuesCsv() {
     if (!qcResults || !qcResults.issues || !qcResults.issues.length) return;
 
-    const cols = ["severity", "entityType", "entityId", "entityName", "ruleCode", "message"];
+    // CSV export requirements:
+    // - Remove the "entityId" and "ruleCode" columns.
+    // - If entityType is "midspan", set entityName to: "midspan <SCID-A> - <SCID-B>".
+    //   If the midspan terminates at a reference point, use only the originating pole SCID.
+    const cols = ["severity", "entityType", "entityName", "message"];
     const lines = [cols.join(",")];
+
+    const poleById = new Map();
+    for (const p of (model && Array.isArray(model.poles) ? model.poles : [])) {
+      if (!p) continue;
+      if (p.poleId == null) continue;
+      poleById.set(String(p.poleId), p);
+    }
+
+    const midById = new Map();
+    for (const ms of (model && Array.isArray(model.midspanPoints) ? model.midspanPoints : [])) {
+      if (!ms) continue;
+      if (ms.midspanId == null) continue;
+      midById.set(String(ms.midspanId), ms);
+    }
+
+    function poleScidByPoleId(poleId) {
+      const key = String(poleId || "");
+      const p = poleById.get(key);
+      return String((p && (p.scid || p.displayName || p.poleTag)) || key);
+    }
+
+    function csvEntityNameForIssue(i) {
+      if (!i) return "";
+      if (i.entityType !== "midspan") return i.entityName || "";
+
+      const ms = midById.get(String(i.entityId || ""));
+      if (!ms) return i.entityName || "midspan";
+
+      const aPoleId = String(ms.aPoleId || "");
+      const bPoleId = String(ms.bPoleId || "");
+
+      const scids = [];
+      if (aPoleId) scids.push(poleScidByPoleId(aPoleId));
+      if (bPoleId && bPoleId !== aPoleId) scids.push(poleScidByPoleId(bPoleId));
+
+      if (!scids.length) return "midspan";
+      if (scids.length === 1) return `midspan ${scids[0]}`;
+      return `midspan ${scids[0]} - ${scids[1]}`;
+    }
 
     for (const i of qcResults.issues) {
       const row = [
         i.severity,
         i.entityType,
-        i.entityId,
-        i.entityName || "",
-        i.ruleCode,
+        csvEntityNameForIssue(i),
         i.message,
       ].map(csvEscape).join(",");
       lines.push(row);
@@ -2340,6 +2381,7 @@
 
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
+
 
   // ────────────────────────────────────────────────────────────────────────────
   //  Rules UI

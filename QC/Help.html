@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Katapult NESC QC Map - Help</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <style>
+    /* Help page is intentionally self-contained and does not alter QC logic. */
+
+    .help-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .help-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 11px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      text-decoration: none;
+      font-weight: 650;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .help-back:hover { background: rgba(255,255,255,0.08); }
+
+    .help-kicker {
+      margin-top: 6px;
+      max-width: 980px;
+      line-height: 1.45;
+    }
+
+    .help-step {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .help-step__title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 750;
+      letter-spacing: 0.2px;
+    }
+
+    .help-step__text {
+      margin: 0;
+      color: var(--text);
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .help-note {
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(245,158,11,0.35);
+      background: rgba(245,158,11,0.08);
+      color: var(--text);
+      line-height: 1.5;
+      font-size: 13.5px;
+    }
+    .help-note strong {
+      color: var(--warn);
+    }
+
+    figure.help-figure {
+      margin: 0;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.10);
+      box-shadow: 0 14px 36px rgba(0,0,0,0.28);
+    }
+
+    figure.help-figure img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    figure.help-figure figcaption {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border2);
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.4;
+    }
+
+    .help-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .help-close {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 11px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 650;
+      letter-spacing: 0.2px;
+      user-select: none;
+    }
+    .help-close:hover { background: rgba(255,255,255,0.06); }
+
+    .help-meta {
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 680px) {
+      .help-header { flex-direction: column; align-items: flex-start; }
+      .help-back { width: 100%; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="container">
+      <div class="help-header">
+        <div class="app-header__title">
+          <h1>HELP - HOW DO I USE THIS?</h1>
+          <p class="muted help-kicker">
+            Follow the steps below to export a Katapult <strong>Job JSON</strong> and run the NESC-style clearance checks.
+          </p>
+        </div>
+        <a class="help-back" href="index.html" title="Return to the QC map">
+          Back to Map
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <section class="card">
+      <div class="help-step">
+        <h2 class="help-step__title">Step 1 — Download the Job JSON from Katapult</h2>
+
+        <figure class="help-figure">
+          <a href="1.jpg" target="_blank" rel="noopener noreferrer">
+            <img src="1.jpg" alt="Katapult download manager showing Job JSON export" loading="lazy" />
+          </a>
+          <figcaption>
+            Katapult Download Manager (Data → Job JSON)
+          </figcaption>
+        </figure>
+
+        <p class="help-step__text">
+          Download a JSON file from the Katapult download manager. You will not need to select anything else, but put a checkbox in <strong>"Job JSON"</strong> and hit <strong>"Download All"</strong>.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="help-step">
+        <h2 class="help-step__title">Step 2 — Upload the file and run QC</h2>
+
+        <figure class="help-figure">
+          <a href="2.jpg" target="_blank" rel="noopener noreferrer">
+            <img src="2.jpg" alt="QC map homepage showing Choose File and Run QC" loading="lazy" />
+          </a>
+          <figcaption>
+            Upload the Katapult Job JSON, then click “Run QC”.
+          </figcaption>
+        </figure>
+
+        <p class="help-step__text">
+          Choose the file that downloaded from Katapult, then hit <strong>"Run QC"</strong> to the right.
+        </p>
+
+        <p class="help-note">
+          <strong>NOTE:</strong> If your region has stricter rules than NESC minimums (ie comm separation thresholds are stricter than 4&quot;, or power is required to be more than 40&quot; away from comms, etc...) you can make changes in the <strong>"Rules"</strong> tab once you have hit the <strong>"Run QC"</strong> button.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="help-step">
+        <h2 class="help-step__title">Step 3 — Adjust Rules if required</h2>
+
+        <figure class="help-figure">
+          <a href="3.jpg" target="_blank" rel="noopener noreferrer">
+            <img src="3.jpg" alt="Rules tab showing installing company and comm separation inputs" loading="lazy" />
+          </a>
+          <figcaption>
+            Set the installing company and update comm separation thresholds as needed.
+          </figcaption>
+        </figure>
+
+        <p class="help-step__text">
+          If your comms are required to have a higher separation, input the separation to the bottom right and chose the installing fiber provider from the list.
+        </p>
+
+        <p class="help-step__text">
+          When you're done with your changes, you are now ready to go into the map and view the violations based on the rule set.
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="help-step">
+        <h2 class="help-step__title">Step 4 — View violations on the map</h2>
+
+        <figure class="help-figure">
+          <a href="4.jpg" target="_blank" rel="noopener noreferrer">
+            <img src="4.jpg" alt="Map tab button to view QC results" loading="lazy" />
+          </a>
+          <figcaption>
+            Open the Map tab to review poles and midspans flagged by the QC rules.
+          </figcaption>
+        </figure>
+
+        <div class="help-footer">
+          <div class="help-meta">
+            Tip: If you opened this in a popup window, you can press <strong>Esc</strong> to close it.
+          </div>
+          <a class="help-close" href="index.html">Return to Map</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    // Allows quick close when opened as a popup window.
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        window.close();
+      }
+    });
+  </script>
+</body>
+</html>
