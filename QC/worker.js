@@ -1,0 +1,2318 @@
+/*
+  Web Worker: parses Katapult Job JSON and returns a normalized structure ready for Excel creation.
+
+  Key improvements vs earlier versions:
+  - Robust pole-photo selection (Katapult exports often lack `association: "main"` on node photos)
+  - Full wire extraction from:
+      - photofirst_data.arm -> insulator -> wire
+      - photofirst_data.insulator -> wire
+      - photofirst_data.messenger -> wire
+      - photofirst_data.wire (direct)
+  - Move parsing supports numeric *and* numeric-string forms for `mr_move` and `_effective_moves`.
+  - Midspans now return BOTH Existing and Proposed midspan heights.
+
+  NOTE:
+  - Heights in Katapult photofirst_data are typically inches (float).
+  - In the Katapult Job JSON exports we've seen, make-ready moves (`mr_move`, `_effective_moves`,
+    and `last_mr_state.mr_data["wire:*:mr_move"]`) are stored in **inches** (positive = up,
+    negative = down). Earlier prototypes assumed tenths-of-inches; that will under-report moves
+    by 10× (e.g., +24" becomes +2.4").
+*/
+
+self.onmessage = async (ev) => {
+  const msg = ev.data || {};
+  if (msg.type !== "start" && msg.type !== "preview") return;
+
+  try {
+    const t0 = Date.now();
+    const buf = msg.buffer;
+    const options = msg.options || {};
+
+    progress(6, "Decoding JSON…");
+    log("Decoding ArrayBuffer…");
+    const text = new TextDecoder("utf-8").decode(buf);
+
+    progress(12, "Parsing JSON…");
+    log("JSON.parse starting…");
+    const job = JSON.parse(text);
+
+    // Fast path for map preview: only index poles + basic metadata.
+    if (msg.type === "preview") {
+      progress(30, "Indexing poles…");
+      const nodes = job.nodes || {};
+      const connections = job.connections || {};
+      const poleOut = [];
+      for (const [nid, n] of Object.entries(nodes)) {
+        if (getNodeType(n) !== "pole") continue;
+        const lat = n && n.latitude != null ? parseNumberMaybe(n.latitude) : null;
+        const lon = n && n.longitude != null ? parseNumberMaybe(n.longitude) : null;
+        const scid = getScid(n);
+        const poleTag = getPoleTag(n);
+        const displayName = makeDisplayName(scid, poleTag);
+        const nodeColorHex = getNodeColorHex(job, n, options.nodeColorAttribute);
+        poleOut.push({ poleId: nid, scid, poleTag, displayName, lat, lon, nodeColorHex });
+      }
+      // Also emit basic span lines so the map feels complete even before the full parse.
+      const spanOut = [];
+      for (const [cid, c] of Object.entries(connections)) {
+        if (!c) continue;
+        const a = c.start_node || c.startNode;
+        const b = c.end_node || c.endNode;
+        if (a == null || b == null) continue;
+        const nodeA = nodes[a];
+        const nodeB = nodes[b];
+        const aIsPole = nodeA && getNodeType(nodeA) === "pole";
+        const bIsPole = nodeB && getNodeType(nodeB) === "pole";
+
+        const aLat = nodeA && nodeA.latitude != null ? parseNumberMaybe(nodeA.latitude) : null;
+        const aLon = nodeA && nodeA.longitude != null ? parseNumberMaybe(nodeA.longitude) : null;
+        const bLat = nodeB && nodeB.latitude != null ? parseNumberMaybe(nodeB.latitude) : null;
+        const bLon = nodeB && nodeB.longitude != null ? parseNumberMaybe(nodeB.longitude) : null;
+
+        if ((aIsPole || bIsPole) && aLat != null && aLon != null && bLat != null && bLon != null) {
+          spanOut.push({
+            connectionId: String(cid),
+            aNodeId: String(a),
+            bNodeId: String(b),
+            aIsPole,
+            bIsPole,
+            aLat, aLon, bLat, bLon,
+          });
+        }
+      }
+
+      progress(60, "Ready.");
+      postMessage({
+        type: "preview",
+        payload: {
+          jobName: job && job.name ? String(job.name) : "",
+          poles: poleOut,
+          spans: spanOut,
+        },
+      });
+      return;
+    }
+
+    const moveUnitPref = options.moveUnit || "auto";
+    MOVE_UNIT_RESOLVED = resolveMoveUnit(job, moveUnitPref);
+    log(`MR move unit: ${MOVE_UNIT_RESOLVED} (pref: ${moveUnitPref})`);
+
+    log("JSON.parse complete.");
+
+    progress(18, "Indexing traces/nodes/photos…");
+
+    const traces = (job.traces && (job.traces.trace_data || job.traces.traceData)) || {};
+    const nodes = job.nodes || {};
+    const photos = job.photos || {};
+    // Expose photo lookup for helper functions (e.g., endpoint effective-move resolution).
+    PHOTOS_MAP = photos;
+    const connections = job.connections || {};
+
+    // Identify pole nodes
+    const poleIds = [];
+    for (const [nid, n] of Object.entries(nodes)) {
+      if (getNodeType(n) === "pole") poleIds.push(nid);
+    }
+    log(`Poles found: ${poleIds.length}`);
+
+    // Optional selection filter (map polygon selection in the UI).
+    // IMPORTANT: We do NOT filter nodes/connections/photos themselves; we only
+    // reduce which pole sheets are generated. Midspans for a selected pole must
+    // still include spans to unselected poles.
+    let SELECTED_POLE_SET = null;
+    if (Array.isArray(options.selectedPoleIds) && options.selectedPoleIds.length) {
+      SELECTED_POLE_SET = new Set(options.selectedPoleIds.map((v) => String(v)));
+      const before = poleIds.length;
+      const after = poleIds.filter((id) => SELECTED_POLE_SET.has(String(id))).length;
+      log(`Pole selection active: ${after}/${before}`);
+    }
+
+    const poleIdsToProcess = SELECTED_POLE_SET
+      ? poleIds.filter((id) => SELECTED_POLE_SET.has(String(id)))
+      : poleIds.slice();
+
+    
+    // Midspan extraction (photo-based measurement points)
+    // We emit ONE midspan point per midspan measurement photo (connection section photo)
+    // that contains wire measurements. Each point includes the set of wires measured
+    // in that photo (existing + proposed heights).
+    //
+    // This structure is intentionally map-friendly for QC visualization.
+    const midspanPointsOut = [];
+    const spanLinesOut = [];
+    let midspanCount = 0;
+
+    if (options.includeMidspans !== false) {
+      progress(22, "Processing midspans…");
+      const connEntries = Object.entries(connections);
+      const totalConn = connEntries.length;
+      let processed = 0;
+
+      for (const [cid, c] of connEntries) {
+        processed++;
+        if (processed % 100 === 0) {
+          progress(22 + Math.floor((processed / Math.max(1, totalConn)) * 18), `Processing midspans (${processed}/${totalConn})…`);
+        }
+
+        const a = c.node_id_1;
+        const b = c.node_id_2;
+        const nodeA = nodes[a];
+        const nodeB = nodes[b];
+
+        const aIsPole = nodeA && getNodeType(nodeA) === "pole";
+        const bIsPole = nodeB && getNodeType(nodeB) === "pole";
+
+        // If the user selected a subset of poles, only keep connections that touch the selection.
+        if (SELECTED_POLE_SET) {
+          const aSel = aIsPole && SELECTED_POLE_SET.has(String(a));
+          const bSel = bIsPole && SELECTED_POLE_SET.has(String(b));
+          if (!aSel && !bSel) continue;
+        }
+
+        const aLat = nodeA && nodeA.latitude != null ? parseNumberMaybe(nodeA.latitude) : null;
+        const aLon = nodeA && nodeA.longitude != null ? parseNumberMaybe(nodeA.longitude) : null;
+        const bLat = nodeB && nodeB.latitude != null ? parseNumberMaybe(nodeB.latitude) : null;
+        const bLon = nodeB && nodeB.longitude != null ? parseNumberMaybe(nodeB.longitude) : null;
+
+        // Capture span lines for optional map rendering.
+        // Include pole↔pole and pole↔reference spans (at least one endpoint must be a pole).
+        if ((aIsPole || bIsPole) && aLat != null && aLon != null && bLat != null && bLon != null) {
+          spanLinesOut.push({
+            connectionId: String(cid),
+            aNodeId: String(a),
+            bNodeId: String(b),
+            aIsPole,
+            bIsPole,
+            aLat, aLon, bLat, bLon,
+          });
+        }
+
+        const sections = c.sections || {};
+        for (const [sid, sec] of Object.entries(sections)) {
+          if (!sec || !sec.photos) continue;
+
+          // A single "section" can contain multiple midspan measurement photos.
+          const photoIds = getOrderedPhotoIds(sec.photos);
+          if (!photoIds.length) continue;
+
+          for (const photoId of photoIds) {
+            const p = photos[photoId];
+            const pf = p && p.photofirst_data ? p.photofirst_data : null;
+            if (!pf || !pf.wire) continue;
+
+            const wireEntries = Object.entries(pf.wire || {});
+            if (!wireEntries.length) continue;
+
+            // Count each midspan measurement photo that actually has wire data.
+            midspanCount++;
+
+            // Best-effort midspan GPS (photo preferred; fallback to section; fallback to midpoint of poles).
+            const midLat0 = (p && p.latitude != null) ? parseNumberMaybe(p.latitude) : (sec.latitude != null ? parseNumberMaybe(sec.latitude) : null);
+            const midLon0 = (p && p.longitude != null) ? parseNumberMaybe(p.longitude) : (sec.longitude != null ? parseNumberMaybe(sec.longitude) : null);
+
+            const midLat = (midLat0 != null ? midLat0 : (aLat != null && bLat != null ? (aLat + bLat) / 2 : null));
+            const midLon = (midLon0 != null ? midLon0 : (aLon != null && bLon != null ? (aLon + bLon) / 2 : null));
+
+            // Distances are used to weight endpoint effective moves when the photo is not
+            // actually taken at the geometric midpoint.
+            const distA = (aLat != null && aLon != null && midLat != null && midLon != null)
+              ? haversineMeters(aLat, aLon, midLat, midLon)
+              : null;
+            const distB = (bLat != null && bLon != null && midLat != null && midLon != null)
+              ? haversineMeters(bLat, bLon, midLat, midLon)
+              : null;
+
+            const rowTypeRaw = getMidspanRowType(sec, p);
+            const rowTypeNorm = normalizeRowType(rowTypeRaw);
+
+            const point = {
+              midspanId: `${cid}|${sid}|${photoId}`,
+              connectionId: String(cid),
+              sectionId: String(sid),
+              photoId: String(photoId),
+              aPoleId: aIsPole ? String(a) : "",
+              bPoleId: bIsPole ? String(b) : "",
+              lat: midLat,
+              lon: midLon,
+              rowTypeRaw: rowTypeRaw || "",
+              rowType: rowTypeNorm,
+              measures: [],
+            };
+
+            for (const [wireId, w] of wireEntries) {
+              if (!w || !w._trace) continue;
+              const traceId = w._trace;
+              const baseH = getHeightInches(w);
+              if (baseH == null) continue;
+
+              // IMPORTANT:
+              // Katapult midspan effective moves can be the result of interpolating endpoint moves,
+              // which yields floating-point inches (e.g., 11.9999989"). For QC, field crews and
+              // most construction standards are evaluated at whole-inch resolution.
+              //
+              // Do NOT round the measured height before applying move deltas.
+              // Rounding first can introduce a full-inch error when the measured height carries
+              // fractional inches and the move delta is also fractional.
+              const baseRounded = Math.round(baseH);
+              const move = getMidspanWireMoveInches(w, wireId, photoId, pf, nodeA, nodeB, distA, distB);
+              const proposedRounded = Math.round(baseH + move);
+
+              const t = traces[traceId] || {};
+              const owner = t.company || "";
+              const traceType = (t._trace_type != null ? String(t._trace_type) : "");
+              const cableType = (t.cable_type != null ? String(t.cable_type) : "");
+              const label = normalizeCableType(t, baseRounded);
+
+              point.measures.push({
+                id: `${String(traceId)}|${String(wireId)}|${String(proposedRounded)}`,
+                traceId: String(traceId),
+                owner: owner ? String(owner) : "",
+                traceType,
+                cableType,
+                label,
+                wireId: String(wireId),
+                existingIn: baseRounded,
+                proposedIn: proposedRounded,
+                existingHeight: inchesToFtIn(baseRounded),
+                proposedHeight: inchesToFtIn(proposedRounded),
+              });
+            }
+
+            // Only emit points that have at least 1 valid measured wire height.
+            if (point.measures.length) midspanPointsOut.push(point);
+          }
+        }
+      }
+
+      log(`Midspan photos processed: ${midspanCount}`);
+    } else {
+      log("Midspan processing disabled by option.");
+    }
+
+progress(42, "Processing pole attachments…");
+
+    const polesOut = [];
+    const orderedPoleIds = orderPoleIds(poleIdsToProcess, nodes, connections);
+    const totalPoles = orderedPoleIds.length;
+
+    for (let i = 0; i < totalPoles; i++) {
+      const poleId = orderedPoleIds[i];
+      if (i % 10 === 0) {
+        progress(42 + Math.floor((i / Math.max(1, totalPoles)) * 18), `Processing poles (${i + 1}/${totalPoles})…`);
+      }
+
+      const n = nodes[poleId];
+      const lat = n && n.latitude != null ? parseNumberMaybe(n.latitude) : null;
+      const lon = n && n.longitude != null ? parseNumberMaybe(n.longitude) : null;
+
+      const scid = getScid(n);
+      const poleTag = getPoleTag(n);
+      const displayName = makeDisplayName(scid, poleTag);
+
+      const poleOwner = getPoleOwner(n);
+      const poleOwnerAbbrev = abbreviatePoleOwner(poleOwner);
+      const poleSpec = getPoleHeightClass(n);
+      const proposedPoleSpec = getProposedPoleSpec(n);
+      const poleHeightClass = proposedPoleSpec || poleSpec;
+      const polePla = (proposedPoleSpec != null && String(proposedPoleSpec).trim() !== "") ? "YES" : "NO";
+      const poleReplacementIsTaller = isReplacementTaller(poleSpec, proposedPoleSpec);
+      const nodeColorHex = getNodeColorHex(job, n, options.nodeColorAttribute);
+
+      const rows = [];
+      const seenKey = new Set();
+
+      // Katapult can store attachments across multiple photos for the same pole.
+      // To avoid missing wires/equipment, we merge photofirst_data from ALL photos
+      // that belong to this pole (deduping by traceId/height).
+      const nodePhotos = (n && n.photos) || {};
+      const photoIds = Object.keys(nodePhotos);
+
+      let candidates = [];
+      for (const pid of photoIds) {
+        const p = photos[pid];
+        const pf = p && p.photofirst_data ? p.photofirst_data : null;
+        const score = scorePhotofirst(pf);
+        if (!pf || typeof pf !== "object") continue;
+        // Do NOT skip score==0 blocks: some equipment (e.g., drip loops) can be nested in
+        // photofirst_data and won't register in the shallow scoring heuristic.
+        const meta = nodePhotos && nodePhotos[pid];
+        const isMain = !!(meta && typeof meta === "object" && meta.association === "main");
+        candidates.push({ pid, pf, score, isMain });
+      }
+
+      // Fallback: if nothing scored, try the best-guess photo anyway.
+      const bestPhotoId = n && n.photos ? getBestPolePhotoId(n.photos, photos) : null;
+      if (candidates.length === 0 && bestPhotoId) {
+        const p = photos[bestPhotoId];
+        const pf = p && p.photofirst_data ? p.photofirst_data : null;
+        if (pf && typeof pf === "object") {
+          const meta = nodePhotos && nodePhotos[bestPhotoId];
+          const isMain = !!(meta && typeof meta === "object" && meta.association === "main");
+          candidates.push({ pid: bestPhotoId, pf, score: 0, isMain });
+        }
+      }
+
+      candidates.sort((a, b) => {
+        const am = a && a.isMain ? 1 : 0;
+        const bm = b && b.isMain ? 1 : 0;
+        if (bm !== am) return bm - am;
+        const ds = (b.score || 0) - (a.score || 0);
+        if (ds !== 0) return ds;
+        return String(a.pid || '').localeCompare(String(b.pid || ''));
+      });
+
+      // Accumulate equipment across all photos so we can output a single merged row per trace.
+      const byTrace = {};
+
+      for (const c of candidates) {
+        const pf = c.pf;
+
+        // Wires (incl. arms/insulators/messengers/direct wires)
+        extractWireRows(pf, traces, rows, seenKey, c.pid);
+
+        // Guys
+        if (options.includeGuys) {
+          const guys = pf.guying || {};
+          for (const gid in guys) {
+            const g = guys[gid];
+            const traceId = g._trace;
+            if (!traceId) continue;
+            const h = getHeightInches(g);
+            if (h == null) continue;
+            const move = getMoveInches(g);
+            const row = makeRow(traceId, traces[traceId] || {}, h, h + move, { category: "Guy" });
+            const sortIn = row.sortHeightInches;
+            const key = `Guy|${traceId}|${Math.round(sortIn)}`;
+            if (!seenKey.has(key)) {
+              seenKey.add(key);
+              rows.push(row);
+            }
+          }
+        }
+
+        // Equipment (accumulate first; emit after we process all photos)
+        if (options.includeEquipment) {
+          const eqObjs = collectEquipmentObjects(pf, traces);
+          for (const e of eqObjs) {
+            const traceId = e && e._trace;
+            if (!traceId) continue;
+            if (!byTrace[traceId]) byTrace[traceId] = { traceId, items: [] };
+            byTrace[traceId].items.push(e);
+          }
+        }
+      }
+
+      // Emit equipment rows (one per unique measured height per trace) after combining all photos.
+      // Many equipment types (e.g., streetlights, transformers, drip loops) can be measured at multiple
+      // points on the pole. Katapult often stores these as separate photofirst objects that share the
+      // same _trace but have different _measured_height values. We output one row per distinct height.
+      if (options.includeEquipment) {
+        for (const group of Object.values(byTrace)) {
+          const tid = group.traceId;
+          const t = traces[tid] || {};
+          const owner = t.company || "";
+
+          // Bucket equipment by rounded-inch height to dedupe across multiple photos.
+          const heightBuckets = new Map(); // key: rounded inches -> { sum, n, objs: [] }
+
+          for (const e of group.items) {
+            const h = getHeightInches(e);
+            if (h == null) continue;
+            const k = Math.round(h);
+            const b = heightBuckets.get(k) || { sum: 0, n: 0, objs: [] };
+            b.sum += h;
+            b.n += 1;
+            b.objs.push(e);
+            heightBuckets.set(k, b);
+          }
+
+          if (!heightBuckets.size) continue;
+
+          const groups = Array.from(heightBuckets.entries()).map(([k, b]) => {
+            const mean = b.sum / Math.max(1, b.n);
+
+            // Representative object: closest to mean height.
+            let rep = b.objs[0];
+            let bestD = Math.abs((getHeightInches(rep) || mean) - mean);
+            for (const o of b.objs) {
+              const oh = getHeightInches(o);
+              if (oh == null) continue;
+              const d = Math.abs(oh - mean);
+              if (d < bestD) {
+                bestD = d;
+                rep = o;
+              }
+            }
+
+            return { k, h: mean, rep };
+          });
+
+          // Higher attachments first
+          groups.sort((a, b) => b.h - a.h);
+
+          for (let gi = 0; gi < groups.length; gi++) {
+            const g = groups[gi];
+            const existing = g.h;
+            const move = getMoveInches(g.rep);
+            const proposed = existing + move;
+
+            let label = normalizeEquipmentLabel(t, g.rep, existing);
+
+            // If an equipment trace has multiple height points, label them clearly.
+            if (groups.length === 2) {
+              label = `${label} (${gi === 0 ? "Top" : "Bottom"})`;
+            } else if (groups.length > 2) {
+              label = `${label} (Pt ${gi + 1})`;
+            }
+
+            const row = makeRow({ traceId: tid, category: "Equipment", owner, existingIn: existing, proposedIn: proposed, comments: label });
+            const sortIn = row._sortIn;
+            const key = `Equipment|${tid}|${Math.round(sortIn)}`;
+            if (!seenKey.has(key)) {
+              seenKey.add(key);
+              rows.push(row);
+            }
+          }
+        }
+      }
+
+      // sort
+      rows.sort((a, b) => b.sortHeightInches - a.sortHeightInches);
+
+      if (rows.length === 0) {
+        rows.push(makeRow({
+          traceId: "",
+          category: "EMPTY",
+          owner: "",
+          existingIn: null,
+          proposedIn: null,
+          comments: "No photofirst_data rows found",
+        }));
+      }
+
+      // Sort by height desc (existing if present else proposed)
+      rows.sort((a, b) => (b._sortIn - a._sortIn));
+
+      
+      // Midspan pivot intentionally omitted for QC output.
+      // Midspan measurement points are emitted separately as `midspanPointsOut`.
+polesOut.push({
+        poleId: String(poleId),
+        displayName,
+        scid,
+        poleTag,
+        lat,
+        lon,
+        nodeColorHex,
+        poleOwner: poleOwnerAbbrev || "",
+        poleSpec: poleSpec || "",
+        proposedPoleSpec: proposedPoleSpec || "",
+        poleHeightClass: poleHeightClass || "",
+        poleReplacement: polePla === "YES",
+        poleReplacementIsTaller: !!poleReplacementIsTaller,
+        polePla,
+        attachments: rows.map(r => {
+          const t = (r && r.traceId && traces[r.traceId]) ? traces[r.traceId] : {};
+          const traceType = (t && t._trace_type != null) ? String(t._trace_type) : "";
+          const cableType = (t && t.cable_type != null) ? String(t.cable_type) : "";
+          const traceName = (t && t.name != null) ? String(t.name) : "";
+          const traceLabel = (t && t.label != null) ? String(t.label) : "";
+
+          const existingIn = (r && r.existingIn != null) ? Math.round(r.existingIn) : null;
+          const proposedIn = (r && r.proposedIn != null) ? Math.round(r.proposedIn) : null;
+          const sortH = (proposedIn != null ? proposedIn : (existingIn != null ? existingIn : 0));
+
+          return {
+            id: `${r.category || "Item"}|${r.traceId || ""}|${sortH}`,
+            traceId: r.traceId || "",
+            category: r.category || "",
+            owner: r.owner || "",
+            traceType,
+            cableType,
+            name: traceName,
+            traceLabel,
+            label: r.comments || "",
+            makeReadyNotes: r.makeReadyNotes || "",
+            existingIn,
+            proposedIn,
+            existingHeight: r.existingHeight || "",
+            proposedHeight: r.proposedHeight || "",
+            isNew: !!(r && r._isNew),
+            isMoved: !!(r && r._isMoved),
+          };
+        }),
+      });
+    }
+
+    progress(62, "Finalizing output…");
+
+    const jobName = job.name || "";
+    const jobOwner = job.job_owner || "";
+    const jobCreator = job.job_creator || "";
+    const dateCreated = job.date_created ? new Date(job.date_created).toISOString() : "";
+    const lastUpload = job.last_upload ? new Date(job.last_upload).toISOString() : "";
+
+    const companyGuess = guessCompany(traces);
+
+    const payload = {
+      jobName,
+      jobOwner,
+      jobCreator,
+      dateCreated,
+      lastUpload,
+      companyGuess,
+      locationGuess: guessLocation(jobName),
+      midspanCount,
+      poles: polesOut,
+      midspanPoints: midspanPointsOut,
+      spans: spanLinesOut,
+      companies: Array.from(new Set(Object.values(traces).map(t => (t && t.company ? String(t.company) : "")).filter(Boolean))).sort(),
+    };
+
+    const ms = Date.now() - t0;
+    log(`Normalize complete in ${(ms / 1000).toFixed(2)}s.`);
+
+    progress(64, "Ready.");
+    postMessage({ type: "done", payload });
+  } catch (err) {
+    postMessage({ type: "error", message: err && err.message ? err.message : String(err) });
+  }
+};
+
+function log(message) {
+  postMessage({ type: "log", message });
+}
+
+function progress(pct, label) {
+  postMessage({ type: "progress", pct, label });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Midspan helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getMidspanRowType(sectionObj, photoObj) {
+  // Best-effort extraction of right-of-way / clearance type for a midspan measurement.
+  // Katapult job exports vary; we look across a few common field names.
+  const candidates = [];
+
+  function push(v) {
+    if (v == null) return;
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (s) candidates.push(s);
+      return;
+    }
+    if (typeof v === "object") {
+      const first = getFirstValue(v);
+      if (typeof first === "string" && first.trim()) candidates.push(first.trim());
+    }
+  }
+
+  // Katapult commonly stores midspan ROW/"over" classifications inside photofirst_data.
+  // In the provided test job, these values appear under:
+  // - photo.photofirst_data.ground_marker.*.over
+  // - photo.photofirst_data.midspanHeight.*.over
+  if (photoObj && typeof photoObj === "object") {
+    const pf = photoObj.photofirst_data;
+    if (pf && typeof pf === "object") {
+      const gm = pf.ground_marker || pf.groundMarker;
+      if (gm && typeof gm === "object") {
+        for (const v of Object.values(gm)) {
+          if (v && typeof v === "object" && v.over != null) push(v.over);
+        }
+      }
+      const mh = pf.midspanHeight;
+      if (mh && typeof mh === "object") {
+        for (const v of Object.values(mh)) {
+          if (v && typeof v === "object" && v.over != null) push(v.over);
+        }
+      }
+    }
+  }
+
+  if (sectionObj && typeof sectionObj === "object") {
+    push(sectionObj.right_of_way);
+    push(sectionObj.rightOfWay);
+    push(sectionObj.row_type);
+    push(sectionObj.rowType);
+    push(sectionObj.clearance_type);
+    push(sectionObj.clearanceType);
+    push(sectionObj.type);
+    if (sectionObj.attributes && typeof sectionObj.attributes === "object") {
+      push(sectionObj.attributes.right_of_way);
+      push(sectionObj.attributes.row_type);
+      push(sectionObj.attributes.clearance_type);
+      push(sectionObj.attributes.type);
+    }
+  }
+
+  if (photoObj && typeof photoObj === "object") {
+    push(photoObj.right_of_way);
+    push(photoObj.row_type);
+    push(photoObj.clearance_type);
+    if (photoObj.attributes && typeof photoObj.attributes === "object") {
+      push(photoObj.attributes.right_of_way);
+      push(photoObj.attributes.row_type);
+      push(photoObj.attributes.clearance_type);
+    }
+  }
+
+  return candidates.length ? candidates[0] : "";
+}
+
+function normalizeRowType(raw) {
+  // Normalize ROW strings to a small set that the QC UI can reason about.
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "default";
+
+  // Pedestrian access / sidewalk / trail
+  if (s.includes("ped") || s.includes("sidewalk") || s.includes("trail") || s.includes("walk")) return "pedestrian";
+
+  // Highway / interstate / freeway
+  if (s.includes("highway") || s.includes("hwy") || s.includes("interstate") || s.includes("freeway")) return "highway";
+
+  // Railroad/rail lines: treat like highway clearance
+  if (s.includes("rail")) return "highway";
+
+  // Farm access
+  if (s.includes("farm")) return "farm";
+
+  return "default";
+}
+
+function pushMidspanMeasurement(store, poleId, traceId, deg, meas) {
+  if (!poleId || !traceId || deg === null || deg === undefined) return;
+  if (!store[poleId]) store[poleId] = {};
+  if (!store[poleId][traceId]) store[poleId][traceId] = {};
+  if (!store[poleId][traceId][deg]) store[poleId][traceId][deg] = [];
+
+  const arr = store[poleId][traceId][deg];
+
+  // Katapult can include multiple midspan measurement nodes within the same
+  // connection section + photo. Use wireId (when available) to keep them distinct.
+  const photoId = meas.photoId || "";
+  const sectionId = meas.sectionId || "";
+  const wireId = meas.wireId || "";
+
+  const key = `${photoId}|${sectionId}|${wireId}`;
+  if (arr.some(m => `${m.photoId || ""}|${m.sectionId || ""}|${m.wireId || ""}` === key)) return;
+
+  arr.push({
+    existing: meas.existing,
+    proposed: meas.proposed,
+    distM: meas.distM,
+    photoId,
+    sectionId,
+    wireId,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Pole photo selection
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getMainPhotoId(photoMap) {
+  if (!photoMap || typeof photoMap !== "object") return null;
+  for (const [pid, meta] of Object.entries(photoMap)) {
+    if (meta && meta.association === "main") return pid;
+  }
+  const ks = Object.keys(photoMap);
+  return ks.length ? ks[0] : null;
+}
+
+function getOrderedPhotoIds(photoMap) {
+  // Sections can contain multiple midspan measurement photos. We want to capture ALL of them,
+  // while still keeping a deterministic order (main first, then the rest).
+  if (!photoMap || typeof photoMap !== "object") return [];
+  const main = [];
+  const rest = [];
+  for (const [pid, meta] of Object.entries(photoMap)) {
+    if (meta && typeof meta === "object" && meta.association === "main") main.push(pid);
+    else rest.push(pid);
+  }
+  const out = [];
+  for (const pid of main.concat(rest)) {
+    if (pid && !out.includes(pid)) out.push(pid);
+  }
+  return out;
+}
+
+function scorePhotofirst(pf) {
+  if (!pf || typeof pf !== "object") return 0;
+
+  let score = 0;
+  for (const key of ["arm", "insulator", "messenger", "wire", "equipment", "guying"]) {
+    const v = pf[key];
+    if (v && typeof v === "object") {
+      const n = Object.keys(v).length;
+      score += Math.max(1, n);
+    }
+  }
+
+  // extra weight for nested arm->insulator->wire
+  const arm = pf.arm;
+  if (arm && typeof arm === "object") {
+    for (const a of Object.values(arm)) {
+      const insMap = a && a._children ? a._children.insulator : null;
+      if (insMap && typeof insMap === "object") {
+        score += Object.keys(insMap).length;
+        for (const ins of Object.values(insMap)) {
+          const wMap = ins && ins._children ? ins._children.wire : null;
+          if (wMap && typeof wMap === "object") score += Object.keys(wMap).length;
+        }
+      }
+    }
+  }
+
+  return score;
+}
+
+function getBestPolePhotoId(photoMap, photos) {
+  if (!photoMap || typeof photoMap !== "object") return null;
+
+  // 1) Explicit "main" if present
+  for (const [pid, meta] of Object.entries(photoMap)) {
+    if (meta && meta.association === "main") return pid;
+  }
+
+  // 2) Otherwise pick the photo with the richest photofirst_data
+  let best = null;
+  let bestScore = -1;
+
+  for (const pid of Object.keys(photoMap)) {
+    const p = photos[pid];
+    if (!p || !p.photofirst_data) continue;
+    const s = scorePhotofirst(p.photofirst_data);
+    if (s > bestScore) {
+      bestScore = s;
+      best = pid;
+    }
+  }
+
+  // 3) Fallback
+  if (best) return best;
+  const ks = Object.keys(photoMap);
+  return ks.length ? ks[0] : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Pole extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+function combineParentAndWireMoves(parentMv, wireMv) {
+  // Katapult can represent the *same* make-ready delta at multiple levels in the
+  // photofirst object graph (e.g., insulator.mr_move AND wire.mr_move).
+  //
+  // If we blindly sum those values, proposed heights can be overstated (double-counted).
+  //
+  // Heuristic:
+  // - If both parent and wire moves are non-zero and in the same direction, and the
+  //   wire move magnitude is >= the parent move magnitude (within a small tolerance),
+  //   treat the wire move as the already-resolved total and ignore the parent move.
+  // - Otherwise, treat the wire move as an additional delta and sum.
+  const p = (typeof parentMv === 'number' && Number.isFinite(parentMv)) ? parentMv : 0;
+  const w = (typeof wireMv === 'number' && Number.isFinite(wireMv)) ? wireMv : 0;
+  if (!p) return w;
+  if (!w) return p;
+
+  const sameDir = Math.sign(p) === Math.sign(w);
+  const tol = 0.75; // inches
+
+  if (sameDir && (Math.abs(w) >= (Math.abs(p) - tol))) {
+    return w;
+  }
+  return p + w;
+}
+
+function extractWireRows(pf, traces, rows, seenKey, photoId) {
+  // Direct wires (photofirst_data.wire)
+  const direct = pf.wire || {};
+  for (const [wireId, w] of Object.entries(direct)) {
+    if (!w || !w._trace) continue;
+    const traceId = w._trace;
+    const h = getHeightInches(w);
+    if (h == null) continue;
+    const mv = getWireMoveInches(w, wireId, pf, photoId);
+    const prop = h + mv;
+    const t = traces[traceId] || {};
+    const owner = t.company || "";
+    const comments = normalizeCableType(t, h);
+
+    const row = makeRow({ traceId, category: "Wire", owner, existingIn: h, proposedIn: prop, comments });
+    const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
+    if (!seenKey.has(key)) {
+      seenKey.add(key);
+      rows.push(row);
+    }
+  }
+
+  // Top-level insulators
+  const ins = pf.insulator || {};
+  for (const insObj of Object.values(ins)) {
+    if (!insObj || !insObj._children || !insObj._children.wire) continue;
+    const h = getHeightInches(insObj);
+    if (h == null) continue;
+    const mv = getMoveInches(insObj);
+
+    for (const [wireId, child] of Object.entries(insObj._children.wire || {})) {
+      const wireMv = getWireMoveInches(child, wireId, pf, photoId);
+      const prop = h + combineParentAndWireMoves(mv, wireMv);
+      const traceId = child && child._trace ? child._trace : null;
+      if (!traceId) continue;
+      const t = traces[traceId] || {};
+      const owner = t.company || "";
+      const comments = normalizeCableType(t, h);
+
+      const row = makeRow({ traceId, category: "Wire", owner, existingIn: h, proposedIn: prop, comments });
+      const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
+      if (!seenKey.has(key)) {
+        seenKey.add(key);
+        rows.push(row);
+      }
+    }
+  }
+
+  // Messengers
+  const msg = pf.messenger || {};
+  for (const msgObj of Object.values(msg)) {
+    if (!msgObj || !msgObj._children || !msgObj._children.wire) continue;
+    const h = getHeightInches(msgObj);
+    if (h == null) continue;
+    const mv = getMoveInches(msgObj);
+    for (const [wireId, child] of Object.entries(msgObj._children.wire || {})) {
+      const traceId = child && child._trace ? child._trace : null;
+      if (!traceId) continue;
+      const wireMv = getWireMoveInches(child, wireId, pf, photoId);
+      const prop = h + combineParentAndWireMoves(mv, wireMv);
+      const t = traces[traceId] || {};
+      const owner = t.company || "";
+      const comments = normalizeCableType(t, h);
+
+      const row = makeRow({ traceId, category: "Wire", owner, existingIn: h, proposedIn: prop, comments });
+      const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
+      if (!seenKey.has(key)) {
+        seenKey.add(key);
+        rows.push(row);
+      }
+    }
+  }
+
+  // Arms (crossarms): arm -> insulator -> wire
+  const arm = pf.arm || {};
+  for (const armObj of Object.values(arm)) {
+    if (!armObj || typeof armObj !== "object") continue;
+    const armH = getHeightInches(armObj);
+    if (armH == null) continue;
+    const armMv = getMoveInches(armObj);
+
+    // Wires directly under arm (rare)
+    const armWire = armObj._children && armObj._children.wire ? armObj._children.wire : null;
+    if (armWire && typeof armWire === "object") {
+      for (const [wireId, child] of Object.entries(armWire)) {
+        const traceId = child && child._trace ? child._trace : null;
+        if (!traceId) continue;
+        const wireMv = getWireMoveInches(child, wireId, pf, photoId);
+        const t = traces[traceId] || {};
+        const owner = t.company || "";
+        const comments = normalizeCableType(t, armH);
+        const row = makeRow({ traceId, category: "Wire", owner, existingIn: armH, proposedIn: armH + combineParentAndWireMoves(armMv, wireMv), comments });
+        const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
+        if (!seenKey.has(key)) {
+          seenKey.add(key);
+          rows.push(row);
+        }
+      }
+    }
+
+    // Insulators under arm
+    const armIns = armObj._children && armObj._children.insulator ? armObj._children.insulator : null;
+    if (!armIns || typeof armIns !== "object") continue;
+
+    for (const insObj of Object.values(armIns)) {
+      if (!insObj || !insObj._children || !insObj._children.wire) continue;
+
+      const insH = getHeightInches(insObj);
+      const baseH = insH != null ? insH : armH;
+
+      const insMv = getMoveInches(insObj);
+      const totalMv = armMv + insMv;
+
+      for (const [wireId, child] of Object.entries(insObj._children.wire || {})) {
+        const wireMv = getWireMoveInches(child, wireId, pf, photoId);
+        const prop = baseH + combineParentAndWireMoves(totalMv, wireMv);
+        const traceId = child && child._trace ? child._trace : null;
+        if (!traceId) continue;
+        const t = traces[traceId] || {};
+        const owner = t.company || "";
+        const comments = normalizeCableType(t, baseH);
+
+        const row = makeRow({ traceId, category: "Wire", owner, existingIn: baseH, proposedIn: prop, comments });
+        const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
+        if (!seenKey.has(key)) {
+          seenKey.add(key);
+          rows.push(row);
+        }
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Node attribute helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getFirstValue(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  const ks = Object.keys(obj);
+  if (!ks.length) return null;
+  return obj[ks[0]];
+}
+
+function getNodeType(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+  const nt = attrs.node_type;
+  if (!nt) return null;
+  if (typeof nt === "string") return nt;
+  if (typeof nt === "object") return getFirstValue(nt);
+  return null;
+}
+
+function getScid(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+  const sc = attrs.scid;
+  if (!sc) return "";
+  if (typeof sc === "string") return sc;
+  if (typeof sc === "object") return getFirstValue(sc) || "";
+  return "";
+}
+
+function getPoleTag(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+  const pt = attrs.pole_tag;
+  if (!pt || typeof pt !== "object") return "";
+
+  const first = getFirstValue(pt);
+  if (first && typeof first === "object" && first.tagtext) return String(first.tagtext);
+
+  for (const v of Object.values(pt)) {
+    if (v && typeof v === "object") {
+      if (v.tagtext) return String(v.tagtext);
+      const inner = getFirstValue(v);
+      if (inner && inner.tagtext) return String(inner.tagtext);
+    }
+  }
+  return "";
+}
+
+function getPoleOwner(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+  const pt = attrs.pole_tag;
+  if (!pt || typeof pt !== "object") return "";
+
+  const first = getFirstValue(pt);
+  if (first && typeof first === "object" && first.company) return String(first.company);
+
+  for (const v of Object.values(pt)) {
+    if (v && typeof v === "object") {
+      if (v.company) return String(v.company);
+      const inner = getFirstValue(v);
+      if (inner && inner.company) return String(inner.company);
+    }
+  }
+  return "";
+}
+
+function abbreviatePoleOwner(owner) {
+  // Utility-agnostic: preserve the full owner string.
+  return owner || "";
+}
+
+function getPoleHeightClass(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+
+  const spec = getFirstValue(attrs.pole_spec);
+  if (spec) {
+    if (typeof spec === "string") return spec.trim();
+    if (typeof spec === "number") return String(spec);
+    return String(spec).trim();
+  }
+
+  // Fallback: build from height/class/species if present.
+  const ph = getFirstValue(attrs.pole_height);
+  const pc = getFirstValue(attrs.pole_class);
+  const ps = getFirstValue(attrs.pole_species);
+  const parts = [ph, pc, ps].filter(v => v != null && String(v).trim() !== "");
+  return parts.join(" ").trim();
+}
+
+function getProposedPoleSpec(n) {
+  const attrs = (n && n.attributes) ? n.attributes : {};
+  const proposedSpec = getFirstValue(attrs.proposed_pole_spec);
+  if (proposedSpec == null) return "";
+  return String(proposedSpec).trim();
+}
+
+function parsePoleHeightFeet(specString) {
+  const s = String(specString || "");
+  if (!s.trim()) return null;
+  const nums = Array.from(s.matchAll(/\d{2,3}|\d/g)).map(m => parseInt(m[0], 10)).filter(n => Number.isFinite(n));
+  if (!nums.length) return null;
+  // Typical pole heights: 2-digit values like 30, 35, 40, 45...
+  // Specs may also include class numbers (e.g., 2, 3, 4), so we prefer the largest "reasonable" value.
+  const candidates = nums.filter(n => n >= 20 && n <= 120);
+  if (!candidates.length) return null;
+  return Math.max(...candidates);
+}
+
+function isReplacementTaller(existingSpec, proposedSpec) {
+  const p = parsePoleHeightFeet(proposedSpec);
+  if (p == null) return false;
+  const e = parsePoleHeightFeet(existingSpec);
+  if (e == null) return false;
+  return p > e;
+}
+
+function makeDisplayName(scid, tag) {
+  const s = scid && String(scid).trim() ? String(scid).trim() : "";
+  const t = tag && String(tag).trim() ? String(tag).trim() : "";
+  if (s && t) return `SCID ${s} Tag ${t}`;
+  if (s && !t) return `SCID ${s} No Tag`;
+  if (!s && t) return `SCID Tag ${t}`;
+  return "SCID UNKNOWN";
+}
+
+function sanitizeSheetName(name) {
+  const cleaned = (name || "").replace(/[\\/:\?\[\]]/g, "_");
+  return cleaned.slice(0, 31) || "Sheet";
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Node styling helpers (used for sheet tab colors)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function normalizeHexColor(color) {
+  if (color == null) return null;
+  let s = String(color).trim();
+  if (!s) return null;
+
+  // Support rgb()/rgba() for maps that use CSS-style colors.
+  const m = s.match(
+    /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*([0-9]*\.?[0-9]+)\s*)?\)$/i
+  );
+  if (m) {
+    const clamp = (n) => Math.max(0, Math.min(255, n));
+    const toHex2 = (n) => clamp(n).toString(16).padStart(2, "0").toUpperCase();
+    const r = parseInt(m[1], 10);
+    const g = parseInt(m[2], 10);
+    const b = parseInt(m[3], 10);
+    return "#" + toHex2(r) + toHex2(g) + toHex2(b);
+  }
+
+  // Hex formats:
+  //   #RRGGBB
+  //   #RGB
+  //   #RRGGBBAA (CSS-style alpha at end; we drop alpha)
+  if (s.startsWith("#")) s = s.slice(1);
+  if (s.length === 8) s = s.slice(0, 6);
+  if (s.length === 3) s = s.split("").map(ch => ch + ch).join("");
+  if (s.length !== 6) return null;
+  if (!/^[0-9a-fA-F]{6}$/.test(s)) return null;
+  return ("#" + s).toUpperCase();
+}
+
+function _styleExtractPrimitiveValues(val, outArr) {
+  if (val == null) return;
+  const t = typeof val;
+  if (t === "string" || t === "number" || t === "boolean") {
+    const s = String(val).trim();
+    if (s !== "") outArr.push(s);
+    return;
+  }
+  if (Array.isArray(val)) {
+    for (const it of val) _styleExtractPrimitiveValues(it, outArr);
+    return;
+  }
+  if (t === "object") {
+    for (const v of Object.values(val)) {
+      _styleExtractPrimitiveValues(v, outArr);
+    }
+  }
+}
+
+function _styleGetAttrValues(attrs, attrName) {
+  if (!attrs || !attrName) return [];
+  const raw = attrs[attrName];
+  const out = [];
+  _styleExtractPrimitiveValues(raw, out);
+  // de-dupe while preserving order
+  const seen = new Set();
+  const uniq = [];
+  for (const v of out) {
+    const k = v.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(v);
+  }
+  return uniq;
+}
+
+function _styleResolvePath(node, pathStr) {
+  const path = String(pathStr || "").trim();
+  if (!path) return [];
+  const parts = path.split(".").filter(Boolean);
+  let frontier = [node];
+  for (const part of parts) {
+    const next = [];
+    for (const cur of frontier) {
+      if (cur == null) continue;
+      if (part === "*") {
+        if (Array.isArray(cur)) {
+          next.push(...cur);
+        } else if (typeof cur === "object") {
+          next.push(...Object.values(cur));
+        }
+      } else {
+        if (Array.isArray(cur)) {
+          for (const it of cur) {
+            if (it && typeof it === "object" && part in it) next.push(it[part]);
+          }
+        } else if (typeof cur === "object") {
+          if (part in cur) next.push(cur[part]);
+        }
+      }
+    }
+    frontier = next;
+    if (!frontier.length) break;
+  }
+  const out = [];
+  _styleExtractPrimitiveValues(frontier, out);
+  const seen = new Set();
+  const uniq = [];
+  for (const v of out) {
+    const k = v.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(v);
+  }
+  return uniq;
+}
+
+function _styleEvalExpr(expr, node) {
+  if (!expr || typeof expr !== "object") return false;
+  const type = String(expr.type || "").toUpperCase();
+  if (type === "EXPRESSION") {
+    const op = String(expr.op || "").toUpperCase();
+    if (op === "AND") return _styleEvalExpr(expr.arg_01, node) && _styleEvalExpr(expr.arg_02, node);
+    if (op === "OR") return _styleEvalExpr(expr.arg_01, node) || _styleEvalExpr(expr.arg_02, node);
+    if (op === "NOT") return !_styleEvalExpr(expr.arg_01, node);
+    if (op === "EQUAL") {
+      const left = _styleEvalValue(expr.arg_01, node);
+      const right = _styleEvalValue(expr.arg_02, node);
+      for (const l of left) {
+        for (const r of right) {
+          if (String(l).trim().toLowerCase() === String(r).trim().toLowerCase()) return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
+function _styleEvalValue(expr, node) {
+  if (!expr || typeof expr !== "object") return [];
+  const type = String(expr.type || "").toUpperCase();
+  if (type === "DATA") {
+    return _styleResolvePath(node, expr.path);
+  }
+  if (type === "LITERAL") {
+    const out = [];
+    _styleExtractPrimitiveValues(expr.value, out);
+    return out.length ? out : [String(expr.value)];
+  }
+  // Fallback: treat as boolean-ish
+  return [];
+}
+
+function _styleRuleApplies(node, rule) {
+  if (!node || !rule) return false;
+  // Katapult style rules may use either simple attribute comparator OR a full expression tree (rule.applies)
+  if (rule.applies && typeof rule.applies === "object") {
+    try {
+      return _styleEvalExpr(rule.applies, node);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  const attrs = node.attributes || {};
+  const attrName = rule.attribute;
+  if (!attrName) return false;
+  const cmp = String(rule.comparator || "equals").toLowerCase();
+  const vals = _styleGetAttrValues(attrs, attrName);
+
+  if (cmp === "has") {
+    return vals.some(v => String(v).trim() !== "");
+  }
+  if (cmp === "equals") {
+    const want = (rule.value == null) ? "" : String(rule.value).trim();
+    if (want === "!null") return vals.some(v => String(v).trim() !== "");
+    return vals.some(v => String(v).trim().toLowerCase() === want.toLowerCase());
+  }
+  return false;
+}
+
+function _isStrokeIcon(iconStr) {
+  const s = String(iconStr || "").toLowerCase();
+  return s.includes("stroke") || s.includes("thin-stroke");
+}
+
+function _stylePathMentionsAttr(path, attrLower) {
+  if (!path || !attrLower) return false;
+  const s = String(path).toLowerCase();
+  if (s === attrLower) return true;
+  if (s.includes(`.${attrLower}.`)) return true;
+  if (s.endsWith(`.${attrLower}`)) return true;
+  if (s.includes(`attributes.${attrLower}`)) return true;
+  // fallback substring match (handles odd style encodings)
+  return s.includes(attrLower);
+}
+
+function _styleExprMentionsAttr(expr, attrLower) {
+  if (!expr || typeof expr !== "object" || !attrLower) return false;
+  if (expr.type === "Data") {
+    const d = expr.data;
+    if (Array.isArray(d)) return d.some(p => _stylePathMentionsAttr(p, attrLower));
+    return _stylePathMentionsAttr(d, attrLower);
+  }
+  if (Array.isArray(expr.args)) return expr.args.some(a => _styleExprMentionsAttr(a, attrLower));
+  return false;
+}
+
+function _styleRuleMentionsAttr(rule, attrLower) {
+  if (!rule || !attrLower) return false;
+  const ra = String(rule.attribute || "").trim().toLowerCase();
+  if (ra) {
+    if (ra === attrLower) return true;
+    if (ra === `attributes.${attrLower}`) return true;
+    if (ra.endsWith(`.${attrLower}`)) return true;
+    if (ra.includes(attrLower)) return true;
+  }
+  if (rule.applies) return _styleExprMentionsAttr(rule.applies, attrLower);
+  return false;
+}
+
+function getNodeColorHex(job, node, preferredAttr) {
+  // Katapult's map styling is composited (stackable icons). For an Excel tab color,
+  // we want the same *visible/status* color the user sees on the map. In most styles,
+  // that comes from a stackable, filled icon (e.g., MR-level indicator), not the
+  // pole outline / thin-stroke overlays.
+  try {
+    const rules = job && job.map_styles && job.map_styles.default && Array.isArray(job.map_styles.default.nodes)
+      ? job.map_styles.default.nodes
+      : [];
+
+// Optional: let the caller specify the attribute that drives node coloring in the map style.
+// This helps avoid default/base rules (often black) when a project uses an MR_level-like attribute.
+let rulesToEval = rules;
+const pref = String(preferredAttr || "").trim();
+if (pref) {
+  const attrLower = pref.toLowerCase();
+  const filtered = rules.filter(r => _styleRuleMentionsAttr(r, attrLower));
+  if (filtered.length) rulesToEval = filtered;
+}
+    if (!rulesToEval.length) return null;
+
+    let lastAny = null;
+    let lastFill = null;
+    let lastStackableFill = null;
+
+    for (let i = 0; i < rulesToEval.length; i++) {
+      const rule = rulesToEval[i];
+      if (!_styleRuleApplies(node, rule)) continue;
+      const c = normalizeHexColor(rule && rule.color);
+      if (!c) continue;
+
+      const stroke = _isStrokeIcon(rule && rule.icon);
+      const stackable = !!(rule && rule.stackable);
+
+      const cand = { idx: i, color: c, stroke, stackable };
+      lastAny = cand;
+      if (!stroke) {
+        lastFill = cand;
+        if (stackable) lastStackableFill = cand;
+      }
+    }
+
+    const best = lastStackableFill || lastFill || lastAny;
+    return best ? best.color : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Pole ordering (sheet/tab ordering)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _scidSortKey(scid) {
+  const s = (scid == null) ? "" : String(scid).trim();
+  if (!s) return { kind: 2, num: Number.POSITIVE_INFINITY, text: "" };
+  const m = s.match(/-?\d+/);
+  if (m) return { kind: 0, num: parseInt(m[0], 10), text: s.toUpperCase() };
+  return { kind: 1, num: Number.POSITIVE_INFINITY, text: s.toUpperCase() };
+}
+
+function _compareScid(aScid, bScid) {
+  const a = _scidSortKey(aScid);
+  const b = _scidSortKey(bScid);
+  if (a.kind !== b.kind) return a.kind - b.kind;
+  if (a.num !== b.num) return a.num - b.num;
+  return a.text.localeCompare(b.text);
+}
+
+function _getLatLon(node) {
+  if (!node || typeof node !== "object") return null;
+  const lat = parseNumberMaybe(node.latitude);
+  const lon = parseNumberMaybe(node.longitude);
+  if (lat == null || lon == null) return null;
+  return { lat, lon };
+}
+
+function _bearingDeg(lat1, lon1, lat2, lon2) {
+  // Returns initial bearing in degrees (0-360).
+  const toRad = (d) => d * Math.PI / 180;
+  const toDeg = (r) => r * 180 / Math.PI;
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δλ = toRad(lon2 - lon1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  const θ = Math.atan2(y, x);
+  const brng = (toDeg(θ) + 360) % 360;
+  return brng;
+}
+
+function _angleDiffDeg(a, b) {
+  let d = Math.abs(a - b) % 360;
+  if (d > 180) d = 360 - d;
+  return d;
+}
+
+function orderPoleIds(poleIds, nodes, connections) {
+  const poleSet = new Set(poleIds);
+  const adj = Object.create(null);
+  for (const id of poleIds) adj[id] = new Set();
+
+  for (const c of Object.values(connections || {})) {
+    if (!c) continue;
+    const a = c.node_id_1;
+    const b = c.node_id_2;
+    if (!poleSet.has(a) || !poleSet.has(b)) continue;
+    adj[a].add(b);
+    adj[b].add(a);
+  }
+
+  const scidById = Object.create(null);
+  const latLonById = Object.create(null);
+  for (const id of poleIds) {
+    scidById[id] = getScid(nodes[id]);
+    latLonById[id] = _getLatLon(nodes[id]);
+  }
+
+  const compareIds = (aId, bId) => _compareScid(scidById[aId], scidById[bId]);
+
+  function neighborComparator(currId, parentId, sizeById) {
+    return (aId, bId) => {
+      // 1) Prefer the largest subtree first (keeps the "main corridor" together)
+      if (sizeById) {
+        const sa = sizeById[aId] || 0;
+        const sb = sizeById[bId] || 0;
+        if (sa !== sb) return sb - sa;
+      }
+
+      // 2) Prefer the neighbor that continues "straight" from the parent -> current direction (if coords exist).
+      let aScore = 9999;
+      let bScore = 9999;
+
+      if (parentId) {
+        const p = latLonById[parentId];
+        const c = latLonById[currId];
+        const a = latLonById[aId];
+        const b = latLonById[bId];
+        if (p && c && a) {
+          const back = _bearingDeg(c.lat, c.lon, p.lat, p.lon);
+          const toA = _bearingDeg(c.lat, c.lon, a.lat, a.lon);
+          aScore = _angleDiffDeg(back, toA);
+        }
+        if (p && c && b) {
+          const back = _bearingDeg(c.lat, c.lon, p.lat, p.lon);
+          const toB = _bearingDeg(c.lat, c.lon, b.lat, b.lon);
+          bScore = _angleDiffDeg(back, toB);
+        }
+      }
+
+      if (aScore !== bScore) return aScore - bScore;
+
+      // 3) Stable fallback
+      return compareIds(aId, bId);
+    };
+  }
+
+  // Build connected components so we can order each corridor/cluster deterministically.
+  const remaining = new Set(poleIds);
+  const components = [];
+  while (remaining.size) {
+    const seed = remaining.values().next().value;
+    const q = [seed];
+    const comp = [];
+    remaining.delete(seed);
+    while (q.length) {
+      const cur = q.shift();
+      comp.push(cur);
+      for (const nb of (adj[cur] || [])) {
+        if (remaining.has(nb)) {
+          remaining.delete(nb);
+          q.push(nb);
+        }
+      }
+    }
+    components.push(comp);
+  }
+
+  // Sort components by their lowest SCID so multi-cluster jobs are predictable.
+  components.sort((a, b) => {
+    const aMin = a.reduce((best, id) => (best == null || _compareScid(scidById[id], best) < 0 ? scidById[id] : best), null);
+    const bMin = b.reduce((best, id) => (best == null || _compareScid(scidById[id], best) < 0 ? scidById[id] : best), null);
+    return _compareScid(aMin, bMin);
+  });
+
+  const finalOrder = [];
+
+  for (const comp of components) {
+    // Choose an interior-ish start: prefer the highest-degree junction, else a max-degree node.
+    let root = null;
+    let bestDeg = -1;
+    for (const id of comp) {
+      const deg = (adj[id] ? adj[id].size : 0);
+      const isJunction = deg >= 3;
+      const score = isJunction ? (deg + 1000) : deg; // junctions trump non-junctions
+      if (root == null || score > bestDeg || (score === bestDeg && compareIds(id, root) < 0)) {
+        root = id;
+        bestDeg = score;
+      }
+    }
+    if (!root) {
+      // Shouldn't happen, but keep safe.
+      root = comp[0];
+    }
+
+    // Build a spanning tree from root.
+    const parent = Object.create(null);
+    const children = Object.create(null);
+    for (const id of comp) children[id] = [];
+    parent[root] = null;
+    const stack = [root];
+    const seen = new Set([root]);
+
+    while (stack.length) {
+      const cur = stack.pop();
+      const neigh = Array.from(adj[cur] || []).filter(n => comp.includes(n) && !seen.has(n));
+      neigh.sort(neighborComparator(cur, parent[cur], null));
+      for (const nb of neigh) {
+        seen.add(nb);
+        parent[nb] = cur;
+        children[cur].push(nb);
+        stack.push(nb);
+      }
+    }
+
+    // Subtree sizes for "corridor first" ordering.
+    const size = Object.create(null);
+    const post = [];
+    const st = [root];
+    while (st.length) {
+      const cur = st.pop();
+      post.push(cur);
+      for (const ch of (children[cur] || [])) st.push(ch);
+    }
+    for (let i = post.length - 1; i >= 0; i--) {
+      const cur = post[i];
+      let s = 1;
+      for (const ch of (children[cur] || [])) s += (size[ch] || 0);
+      size[cur] = s;
+    }
+
+    // Traverse: walk the biggest branch first, but still keep geometry "straight" when possible.
+    const walk = [{ id: root, parent: null, idx: 0, orderedKids: null }];
+    const emitted = new Set();
+    while (walk.length) {
+      const top = walk[walk.length - 1];
+      const cur = top.id;
+
+      if (!emitted.has(cur)) {
+        emitted.add(cur);
+        finalOrder.push(cur);
+      }
+
+      if (!top.orderedKids) {
+        const kids = (children[cur] || []).slice();
+        kids.sort(neighborComparator(cur, top.parent, size));
+        top.orderedKids = kids;
+        top.idx = 0;
+      }
+
+      if (top.idx < top.orderedKids.length) {
+        const next = top.orderedKids[top.idx++];
+        walk.push({ id: next, parent: cur, idx: 0, orderedKids: null });
+      } else {
+        walk.pop();
+      }
+    }
+
+    // If some nodes weren't reachable from root (should be rare), append them by SCID.
+    if (emitted.size < comp.length) {
+      const leftover = comp.filter(id => !emitted.has(id));
+      leftover.sort(compareIds);
+      for (const id of leftover) finalOrder.push(id);
+    }
+  }
+
+  // Fallback: if something weird happened, append any missing ids.
+  if (finalOrder.length < poleIds.length) {
+    for (const id of poleIds) {
+      if (!finalOrder.includes(id)) finalOrder.push(id);
+    }
+  }
+
+  return finalOrder;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Height + move parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseNumberMaybe(v) {
+  if (v == null) return null;
+  if (typeof v === "number") {
+    return Number.isFinite(v) ? v : null;
+  }
+  if (typeof v === "string") {
+    // JS parseFloat("+ 24") => NaN (space after sign). Katapult sometimes exports
+    // mr_move values like "+ 24\"" / "- 12\"". Accept those.
+    const s0 = v.trim();
+    if (!s0) return null;
+
+    // Match an optional sign, optional whitespace, then a number.
+    const m = s0.match(/^([+-]?)\s*(\d+(?:\.\d+)?)/);
+    if (m) {
+      const sign = m[1] === "-" ? -1 : 1;
+      const mag = parseFloat(m[2]);
+      return Number.isFinite(mag) ? sign * mag : null;
+    }
+
+    // Fallback: first number anywhere in the string.
+    const m2 = s0.match(/(-?\d+(?:\.\d+)?)/);
+    if (m2) {
+      const n = parseFloat(m2[1]);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+  return null;
+}
+
+function parseMoveNumber(v) {
+  return parseNumberMaybe(v);
+}
+
+
+  // --- MR Move unit handling -------------------------------------------------
+  //
+  // In the Katapult job JSON export, measured heights are stored in inches.
+  // For MR moves (mr_move / _effective_moves / last_mr_state.mr_data:*:mr_move),
+  // field teams overwhelmingly expect these to be **inches** as well.
+  //
+  // We still support centimeters (explicit user selection) for metric exports.
+  // The "auto" mode is retained for compatibility, but defaults to inches.
+  //
+  // Auto-detection prefers "cm" when the dataset contains many moves >= ~60 (which would be 5 ft+ if inches).
+
+  // Job-level photo index. Set at runtime inside the worker `onmessage`.
+  // This is used by helpers (e.g., selecting the correct endpoint photo for `_effective_moves`).
+  let PHOTOS_MAP = null;
+
+  let MOVE_UNIT_RESOLVED = "in"; // "in" | "cm"
+
+  function resolveMoveUnit(job, pref) {
+    const p = (pref || "auto").toString().trim().toLowerCase();
+    if (p === "in" || p === "inch" || p === "inches") return "in";
+    if (p === "cm" || p === "centimeter" || p === "centimeters") return "cm";
+    // "auto" and any unknown value default to inches. This matches typical field expectations
+    // and prevents false "cm" inference that can make Proposed heights appear too low.
+    return "in";
+  }
+
+  function detectMoveUnit(job) {
+    const raw = collectRawMoveSamples(job, 700).map((v) => Math.abs(v)).filter((v) => v > 0);
+    if (raw.length < 25) return "in";
+
+    let maxAbs = 0;
+    let ge60 = 0;
+    let ge48 = 0;
+    for (const v of raw) {
+      if (v > maxAbs) maxAbs = v;
+      if (v >= 60) ge60++;
+      if (v >= 48) ge48++;
+    }
+    const shareGe60 = ge60 / raw.length;
+    const shareGe48 = ge48 / raw.length;
+
+    // Heuristics:
+    // - If max is very high, it's extremely unlikely to be inches.
+    // - If a non-trivial share of moves are 60+ (5ft+) when treated as inches, assume centimeters.
+    if (maxAbs >= 90) return "cm";
+    if (shareGe60 >= 0.03) return "cm";
+    if (shareGe48 >= 0.08 && maxAbs >= 70) return "cm";
+    return "in";
+  }
+
+  function collectRawMoveSamples(job, limit = 700) {
+    const out = [];
+    const push = (v) => {
+      const n = parseNumberMaybe(v);
+      if (n == null) return;
+      out.push(n);
+    };
+
+    const photos = job && typeof job === "object" ? job.photos || {} : {};
+    for (const photo of Object.values(photos)) {
+      const pf = photo && typeof photo === "object" ? (photo.photofirst_data || photo.photoFirstData || {}) : {};
+
+      // last_mr_state.mr_data entries
+      const lms = pf.last_mr_state || pf.lastMrState;
+      const mrData = lms && typeof lms === "object" ? (lms.mr_data || lms.mrData) : null;
+      if (mrData && typeof mrData === "object") {
+        for (const [k, v] of Object.entries(mrData)) {
+          if (typeof k === "string" && k.endsWith(":mr_move")) {
+            push(v);
+            if (out.length >= limit) return out;
+          }
+        }
+      }
+
+      const sections = ["wire", "wires", "messenger", "messengers", "guying", "guys", "equipment", "equipments"];
+      for (const sec of sections) {
+        const obj = pf[sec];
+        if (!obj || typeof obj !== "object") continue;
+        for (const entry of Object.values(obj)) {
+          if (!entry || typeof entry !== "object") continue;
+          push(entry.mr_move);
+          const eff = entry._effective_moves;
+          if (eff && typeof eff === "object") {
+            for (const v of Object.values(eff)) {
+              push(v);
+              if (out.length >= limit) return out;
+            }
+          }
+          if (out.length >= limit) return out;
+        }
+      }
+
+      // Insulators contain wires
+      const ins = pf.insulator || pf.insulators;
+      if (ins && typeof ins === "object") {
+        for (const insObj of Object.values(ins)) {
+          if (!insObj || typeof insObj !== "object") continue;
+          const wmap = insObj.wire || insObj.wires;
+          if (wmap && typeof wmap === "object") {
+            for (const w of Object.values(wmap)) {
+              if (!w || typeof w !== "object") continue;
+              push(w.mr_move);
+              const eff = w._effective_moves;
+              if (eff && typeof eff === "object") {
+                for (const v of Object.values(eff)) {
+                  push(v);
+                  if (out.length >= limit) return out;
+                }
+              }
+              if (out.length >= limit) return out;
+            }
+          }
+        }
+      }
+
+      if (out.length >= limit) return out;
+    }
+
+    return out;
+  }
+
+  function moveValueToInches(rawMove) {
+    const n = parseNumberMaybe(rawMove);
+    if (n == null) return null;
+    if (MOVE_UNIT_RESOLVED === "cm") return n / 2.54;
+    return n;
+  }
+  // --------------------------------------------------------------------------
+
+
+function getHeightInches(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  // Katapult photofirst_data heights are typically inches.
+  const mh = parseNumberMaybe(obj._measured_height);
+  if (mh != null) return mh;
+
+  const man = parseNumberMaybe(obj._manual_height);
+  if (man != null) return man;
+
+  // manual_height is often a string in FEET (e.g., "38.5")
+  if (typeof obj.manual_height === "string") {
+    const f = parseNumberMaybe(obj.manual_height);
+    if (f != null) return f * 12;
+  }
+
+  return null;
+}
+
+function getMoveInches(obj) {
+  // MR move values are handled via moveValueToInches(), which supports cm vs in conversion.
+  if (!obj || typeof obj !== "object") return 0;
+
+  const mr = moveValueToInches(obj.mr_move);
+  if (mr != null && mr !== 0) return mr;
+
+  const eff = obj._effective_moves;
+  if (eff && typeof eff === "object") {
+    let best = null;
+    for (const v of Object.values(eff)) {
+      const n = moveValueToInches(v);
+      if (n == null || n === 0) continue;
+      if (best == null || Math.abs(n) > Math.abs(best)) best = n;
+    }
+    if (best != null) return best;
+  }
+
+  return mr != null ? mr : 0;
+}
+
+function inchesToFtIn(inches) {
+  if (inches == null || Number.isNaN(inches)) return "";
+  const total = Math.round(inches);
+  const ft = Math.floor(total / 12);
+  const ins = ((total % 12) + 12) % 12;
+  return `${ft}' ${ins}"`;
+}
+
+function parseHeightTextToInches(text) {
+  const m = /^\s*(\d+)'\s*(\d+)"/.exec(String(text || ""));
+  if (!m) return null;
+  return parseInt(m[1], 10) * 12 + parseInt(m[2], 10);
+}
+
+function minHeightText(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const ai = parseHeightTextToInches(a);
+  const bi = parseHeightTextToInches(b);
+  if (ai == null || bi == null) return a;
+  return bi < ai ? b : a;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Row builder (Make-Ready notes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeRow({ traceId, category, owner, existingIn, proposedIn, comments }) {
+  const exText = existingIn != null ? inchesToFtIn(existingIn) : "";
+  const prText = proposedIn != null ? inchesToFtIn(proposedIn) : "";
+
+  let note = "";
+  if (!exText && prText) {
+    note = `Install new ${owner} ${category} at ${prText}.`;
+  } else if (exText && prText && exText !== prText) {
+    // Snap to nearest inch before computing the diff so we don't generate oddities like 0' 12".
+    const diff = Math.abs(Math.round(proposedIn || 0) - Math.round(existingIn || 0));
+    const ft = Math.floor(diff / 12);
+    const ins = diff % 12;
+    const diffStr = `${ft}' ${ins}"`;
+    const dir = (proposedIn > existingIn) ? "up" : "down";
+    const subj = comments || traceId || "";
+    note = `${subj} moved ${dir} ${diffStr} (from ${exText} to ${prText}).`;
+  }
+
+  const sortIn = (existingIn != null) ? existingIn : (proposedIn != null ? proposedIn : 0);
+
+  return {
+    traceId: traceId || "",
+    category: category || "",
+    owner: owner || "",
+    existingIn: (existingIn != null && Number.isFinite(existingIn)) ? Math.round(existingIn) : null,
+    proposedIn: (proposedIn != null && Number.isFinite(proposedIn)) ? Math.round(proposedIn) : null,
+    existingHeight: exText,
+    proposedHeight: prText,
+    comments: comments || "",
+    makeReadyNotes: note,
+    _isNew: (!exText && !!prText),
+    _isMoved: (!!exText && !!prText && exText !== prText),
+    _sortIn: (existingIn != null && Number.isFinite(existingIn)) ? Math.round(existingIn) : ((proposedIn != null && Number.isFinite(proposedIn)) ? Math.round(proposedIn) : 0),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Cable type normalization (matches earlier legacy behavior)
+// ─────────────────────────────────────────────────────────────────────────────
+
+
+function getWireMoveInches(wireObj, wireId, pf, photoId) {
+  // NOTE:
+  // Katapult exports can store the resolved make-ready delta in a few places.
+  // For midspan wires in particular, Katapult often writes the *resolved* move
+  // directly on the wire object (wireObj.mr_move). The per-photo last_mr_state
+  // can differ (or be stale) for these, so we prefer the direct field first.
+
+  // 1) Direct move on the wire object (authoritative when present)
+  const direct = parseMoveNumber(wireObj && wireObj.mr_move);
+  if (direct != null) {
+    const inches = moveValueToInches(direct);
+    if (inches !== 0) return inches;
+    // If explicitly 0, allow fallthrough (some exports only populate mr_data/_effective_moves).
+  }
+
+  // 2) last_mr_state override (per-photo mr_data)
+  const lms = pf && pf.last_mr_state;
+  const mr = lms && lms.mr_data;
+  if (mr && wireId) {
+    const key = `wire:${wireId}:mr_move`;
+    if (mr[key] !== undefined && mr[key] !== null && String(mr[key]).trim() !== '') {
+      const inches = moveValueToInches(mr[key]);
+      if (inches !== 0 || direct == null) return inches;
+    }
+  }
+
+  // 3) _effective_moves fallback
+  const eff = wireObj && wireObj._effective_moves;
+  if (eff && typeof eff === 'object') {
+    if (photoId && eff[photoId] != null && String(eff[photoId]).trim() !== '') {
+      return moveValueToInches(eff[photoId]);
+    }
+    // take the most significant move across known endpoints as a last resort
+    let best = null;
+    for (const v of Object.values(eff)) {
+      const n = parseMoveNumber(v);
+      if (n == null) continue;
+      if (best == null || Math.abs(n) > Math.abs(best)) best = n;
+    }
+    if (best != null) return moveValueToInches(best);
+  }
+
+  // 4) If a direct move existed (including 0), return it; otherwise 0
+  if (direct != null) return moveValueToInches(direct);
+  return 0;
+}
+
+// Midspan wire moves behave differently than pole attachment moves.
+//
+// For midspan measurement photos, Katapult stores:
+//   - mr_move          : manual slacking adjustment at the measured point (inches)
+//   - _effective_moves : per-endpoint effective move contributions (keyed by endpoint photo ids)
+//
+// The proposed midspan height is derived as:
+//   proposed = measured + mr_move + interp(moveA, moveB)
+//
+// Where moveA/moveB are the endpoint effective moves.
+//
+// IMPORTANT:
+// "Midspan" photos are frequently captured near one endpoint (not at the geometric midpoint).
+// In that case, Katapult weights endpoint move contributions by where the photo/section was
+// taken along the span. We approximate that using distances from the photo/section GPS to each
+// endpoint node (distA/distB).
+//
+// Fallback behaviour when we can't map endpoint photos:
+//   - If we can map moves to endpoints, but we don't have distances: use a simple average.
+//   - If we cannot map to endpoints: fall back to sum(_effective_moves)/2.
+
+function chooseEndpointEffectiveMove(effList, nodePhotoMap) {
+  if (!effList || !effList.length) return null;
+
+  const finite = effList
+    .filter(e => e && typeof e.mv === 'number' && Number.isFinite(e.mv));
+
+  if (!finite.length) return null;
+
+  const nonZero = finite.filter(e => e.mv !== 0);
+
+  // Prefer the endpoint's main photo if it appears in `_effective_moves`,
+  // but avoid accidentally selecting a zero-move when a non-zero exists.
+  const mainPid = nodePhotoMap ? getMainPhotoId(nodePhotoMap) : null;
+  if (mainPid) {
+    const m = finite.find(e => e && e.pid === mainPid);
+    if (m && m.mv !== 0) return m.mv;
+  }
+
+  // Otherwise prefer the most recently taken photo (when available).
+  const pickByRecency = (cands) => {
+    if (!PHOTOS_MAP || typeof PHOTOS_MAP !== 'object') return null;
+    let bestMv = null;
+    let bestT = null;
+    for (const e of cands) {
+      if (!e || !e.pid) continue;
+      const p = PHOTOS_MAP[e.pid];
+      const tRaw = p && (p.date_taken || p.dateTaken || p.timestamp || (p._created && p._created.timestamp));
+      const t = (tRaw != null && !Number.isNaN(Number(tRaw))) ? Number(tRaw) : null;
+      if (t == null) continue;
+      if (bestT == null || t > bestT) {
+        bestT = t;
+        bestMv = e.mv;
+      }
+    }
+    return (bestT != null) ? bestMv : null;
+  };
+
+  // Prefer most recent non-zero when possible
+  if (nonZero.length) {
+    const rec = pickByRecency(nonZero);
+    if (rec != null) return rec;
+  }
+
+  // Then prefer most recent (even if 0) as a stable fallback
+  const recAny = pickByRecency(finite);
+  if (recAny != null && (recAny !== 0 || !nonZero.length)) return recAny;
+
+  // Last resort: choose the move with the largest absolute magnitude among non-zero values,
+  // otherwise return 0.
+  if (nonZero.length) {
+    let best = nonZero[0].mv;
+    for (const e of nonZero) {
+      if (!e || typeof e.mv !== 'number' || !Number.isFinite(e.mv)) continue;
+      if (Math.abs(e.mv) > Math.abs(best)) best = e.mv;
+    }
+    return best;
+  }
+
+  return 0;
+}
+
+function getMidspanWireMoveInches(wireObj, wireId, photoId, pf, nodeA, nodeB, distA, distB) {
+  if (!wireObj || typeof wireObj !== 'object') return 0;
+
+  // IMPORTANT:
+  // In many Katapult exports, `wire.mr_move` on a midspan measurement photo is already the
+  // fully-resolved move at that measured point (it may already include endpoint interpolation
+  // that would otherwise be represented in `_effective_moves`).
+  //
+  // When present and non-zero, treat it as authoritative to avoid double-counting.
+  const directResolved = moveValueToInches(wireObj.mr_move);
+  if (directResolved != null && Number.isFinite(directResolved) && directResolved !== 0) {
+    return directResolved;
+  }
+
+  // 1) Manual slack / explicit midspan MR move.
+  // Some exports will populate mr_move as 0 but carry a non-zero value in last_mr_state.mr_data.
+  let manual = directResolved;
+
+  if (manual == null || manual === 0) {
+    const lms = pf && pf.last_mr_state;
+    const mr = lms && lms.mr_data;
+    if (mr && wireId) {
+      const key = `wire:${wireId}:mr_move`;
+      if (mr[key] !== undefined && mr[key] !== null && String(mr[key]).trim() !== '') {
+        const fromMr = moveValueToInches(mr[key]);
+        if (fromMr != null && (fromMr !== 0 || manual == null)) manual = fromMr;
+      }
+    }
+  }
+  if (manual == null) manual = 0;
+
+  // 2) Endpoint effective moves (or resolved effective move for this midspan photo).
+  const eff = wireObj._effective_moves;
+  if (!eff || typeof eff !== 'object') return manual;
+
+  // If Katapult already computed an effective move at THIS midspan photo id, prefer it.
+  if (photoId && eff[photoId] !== undefined && eff[photoId] !== null && String(eff[photoId]).trim() !== '') {
+    const direct = moveValueToInches(eff[photoId]);
+    if (direct != null && Number.isFinite(direct)) {
+      return manual + direct;
+    }
+  }
+
+  const photosA = (nodeA && nodeA.photos && typeof nodeA.photos === 'object') ? nodeA.photos : null;
+  const photosB = (nodeB && nodeB.photos && typeof nodeB.photos === 'object') ? nodeB.photos : null;
+
+  const listA = [];
+  const listB = [];
+
+  let anyMapped = false;
+  let sumAll = 0;
+  let countAll = 0;
+  let sumOther = 0;
+
+  for (const [pid, raw] of Object.entries(eff)) {
+    const mv = moveValueToInches(raw);
+    if (mv == null || !Number.isFinite(mv)) continue;
+
+    sumAll += mv;
+    countAll += 1;
+
+    const inA = !!(photosA && photosA[pid]);
+    const inB = !!(photosB && photosB[pid]);
+
+    if (inA) {
+      anyMapped = true;
+      listA.push({ pid, mv });
+      continue;
+    }
+    if (inB) {
+      anyMapped = true;
+      listB.push({ pid, mv });
+      continue;
+    }
+
+    // Unmapped contributions can occur in some exports; include them additively later.
+    sumOther += mv;
+  }
+
+  const aSel = chooseEndpointEffectiveMove(listA, photosA);
+  const bSel = chooseEndpointEffectiveMove(listB, photosB);
+  const a = (aSel != null && Number.isFinite(aSel)) ? aSel : 0;
+  const b = (bSel != null && Number.isFinite(bSel)) ? bSel : 0;
+
+  const mappedA = (aSel != null && Number.isFinite(aSel));
+  const mappedB = (bSel != null && Number.isFinite(bSel));
+
+  let effContribution;
+  if (mappedA && mappedB) {
+    // Midspan measurement points are treated as the midpoint for MR interpolation.
+    // This avoids GPS jitter / photo-location artifacts producing non-midpoint weighting.
+    effContribution = (a + b) / 2;
+  } else if (mappedA) {
+    effContribution = a;
+  } else if (mappedB) {
+    effContribution = b;
+  } else {
+    // If we cannot map endpoint photos, assume the available entries are endpoint moves and use
+    // a simple average across them. This avoids halving a single-entry dataset.
+    effContribution = (countAll > 0) ? (sumAll / countAll) : 0;
+  }
+
+  if (anyMapped && sumOther) effContribution += sumOther;
+
+  return manual + effContribution;
+}
+
+function isEquipmentTrace(trace, obj) {
+  const ttype = (trace && trace._trace_type) ? String(trace._trace_type).toLowerCase() : '';
+  if (ttype.includes('equipment')) return true;
+  if (obj && typeof obj === 'object') {
+    if (obj.equipment_type != null) return true;
+    if (obj.equipment_spec != null) return true;
+    // heuristic: many equipment instances carry a specific *_spec field
+    for (const k of Object.keys(obj)) {
+      if (!k.endsWith('_spec')) continue;
+      if (/^(wire|messenger|insulator|anchor|guying|pole)_spec$/i.test(k)) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeEquipmentLabel(trace, obj, measuredInches) {
+  // Build a readable label for equipment rows.
+  //
+  // Goal: populate the "Comments (Group OR Equipment)" column with something
+  // meaningful (e.g., "Secondary Drip Loop" instead of a blank generic "equipment").
+  //
+  // Precedence:
+  //  1) Trace-provided label (cable_type/label/name) when it is non-empty and not generic.
+  //  2) Object equipment_type.
+  //  3) Any *_spec key name as a last-resort hint.
+  //
+  // Additionally, if we can find a matching <equipment_type>_spec value (e.g., drip_loop_spec),
+  // we prefix the label with that value ("Secondary"), producing "Secondary Drip Loop".
+
+  const objIsObject = (obj && typeof obj === 'object');
+
+  let raw = (trace && (trace.cable_type || trace.label || trace.name)) || '';
+  raw = String(raw || '').trim();
+
+  const type = (objIsObject && obj.equipment_type != null) ? String(obj.equipment_type).trim() : '';
+
+  // If trace label is empty or generic, fall back to equipment_type
+  if (!raw || /^equipment$/i.test(raw)) raw = type;
+
+  // If still empty, fall back to a *_spec key name (e.g., transformer_spec -> transformer)
+  if (!raw && objIsObject) {
+    const specKeyName = Object.keys(obj).find(k => {
+      if (!k.endsWith('_spec')) return false;
+      if (/^(wire|messenger|insulator|anchor|guying|pole|equipment)_spec$/i.test(k)) return false;
+      return true;
+    });
+    if (specKeyName) raw = specKeyName.replace(/_spec$/i, '');
+  }
+
+  if (!raw) raw = (trace && trace._trace_type) ? String(trace._trace_type) : 'Equipment';
+
+  // Prefix with a meaningful spec value when present (e.g., drip_loop_spec = "secondary")
+  let specPrefix = '';
+  if (objIsObject && type) {
+    const specKey = `${type}_spec`;
+    if (obj[specKey] != null && String(obj[specKey]).trim() !== '') {
+      specPrefix = String(obj[specKey]).trim();
+    }
+  }
+  if (!specPrefix && objIsObject) {
+    // If we didn't find <type>_spec, pick the first non-empty *_spec value that isn't a wire/guy/etc spec.
+    const specKey = Object.keys(obj).find(k => {
+      if (!k.endsWith('_spec')) return false;
+      if (/^(wire|messenger|insulator|anchor|guying|pole|equipment)_spec$/i.test(k)) return false;
+      const v = obj[k];
+      return v != null && String(v).trim() !== '';
+    });
+    if (specKey) specPrefix = String(obj[specKey]).trim();
+  }
+
+  // Normalize to readable text
+  raw = raw.replace(/_/g, ' ').trim();
+  raw = raw.replace(/\s+/g, ' ');
+
+  if (specPrefix && !/^equipment$/i.test(raw)) {
+    const sp = String(specPrefix).replace(/_/g, ' ').trim().replace(/\s+/g, ' ');
+    raw = `${sp} ${raw}`.trim();
+  }
+
+  // Title Case
+  raw = raw.replace(/\b\w/g, c => c.toUpperCase());
+
+  return raw || 'Equipment';
+}
+
+function collectEquipmentObjects(pf, traces) {
+  // Robust equipment extraction across job models:
+  // capture ANY photofirst object that:
+  //   - has a _trace
+  //   - has a measurable height
+  //   - looks like equipment by trace type or equipment_* hints
+  const out = [];
+  if (!pf || typeof pf !== 'object') return out;
+
+  const visited = new WeakSet();
+  const stack = [pf];
+
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+
+    if (Array.isArray(cur)) {
+      for (let i = 0; i < cur.length; i++) stack.push(cur[i]);
+      continue;
+    }
+
+    const traceId = cur._trace;
+    if (traceId) {
+      const trace = (traces && traces[traceId]) ? traces[traceId] : null;
+      const h = getHeightInches(cur);
+      if (h != null && isEquipmentTrace(trace, cur)) {
+        out.push(cur);
+      }
+    }
+
+    for (const [k, v] of Object.entries(cur)) {
+      // Avoid descending into large pixel selections / masks
+      if (k === 'pixel_selection' || k === 'pixel_mask' || k === 'mask') continue;
+      stack.push(v);
+    }
+  }
+
+  return out;
+}
+
+function normalizeCableType(trace, existingHeightInches) {
+  const owner = trace && trace.company ? String(trace.company) : "";
+  const cableType = trace && trace.cable_type
+    ? String(trace.cable_type)
+    : (trace && trace._trace_type ? String(trace._trace_type) : "");
+
+  let v = cableType || "";
+
+  // Legacy converter replacements (best-effort)
+  v = v.replace(/Communication Service/g, "Comm Drop");
+  v = v.replace(/WEP#\d+/g, "").trim();
+  v = v.replace(/\(Equipment#\d+\)/g, "").trim();
+
+  if (v.includes("Communication Bundle")) {
+    if (owner === "Charter") v = v.replace("Communication Bundle", "CATV");
+    else if (owner === "Omni Fiber") {
+      if (!existingHeightInches) v = v.replace("Communication Bundle", "Proposed Fiber");
+      else v = v.replace("Communication Bundle", "Existing Fiber");
+    } else {
+      if (existingHeightInches) v = v.replace("Communication Bundle", "Existing Fiber");
+    }
+  }
+
+  return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Misc helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeSuggestedFilename(jobName) {
+  const base = (jobName || "katapult_job").toString().trim().replace(/[^a-zA-Z0-9._-]+/g, "_");
+  return `${base}_make_ready.xlsx`;
+}
+
+function guessCompany(traces) {
+  const counts = {};
+  for (const t of Object.values(traces)) {
+    const c = t && t.company ? String(t.company) : "";
+    if (!c) continue;
+    counts[c] = (counts[c] || 0) + 1;
+  }
+  let best = "";
+  let bestN = 0;
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > bestN) {
+      bestN = v;
+      best = k;
+    }
+  }
+  return best;
+}
+
+function guessLocation(jobName) {
+  const s = (jobName || "").toString();
+  const m = /([A-Za-z\s]+),\s*([A-Z]{2})/.exec(s);
+  if (m) return `${m[1].trim()}, ${m[2].trim()}`;
+  return "";
+}
+
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => d * Math.PI / 180;
+  const toDeg = (r) => r * 180 / Math.PI;
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δλ = toRad(lon2 - lon1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  const θ = Math.atan2(y, x);
+  return (toDeg(θ) + 360) % 360;
+}
+
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  const toRad = (d) => d * Math.PI / 180;
+  const R = 6371000; // meters
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δφ = toRad(lat2 - lat1);
+  const Δλ = toRad(lon2 - lon1);
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
