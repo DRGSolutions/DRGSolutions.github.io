@@ -16,10 +16,9 @@
       <div class="app-header__title">
         <h1>Katapult NESC QC Map</h1>
         <div class="version-block muted">
-          <div class="version-block__title">Version 3.0 release 1/20/26</div>
-          <div>-NEW 3D Walkout feature! (2D is default, change view to 3D if desired)</div>
-          <div>-Comm ordering violations in yellow</div>
-          <div>-Updated midspan ROW logic from v 2.1</div>
+          <div class="version-block__title">Version 2.1</div>
+          <div>-Now includes comm ordering violations circled in yellow</div>
+          <div>-Updated midspan ROW logic</div>
         </div>
         <p class="muted">
           <a href="Help.html" target="_blank" rel="noopener noreferrer"
@@ -103,21 +102,6 @@
             <label class="chip"><input type="checkbox" id="filterFail" checked> Fail</label>
           </div>
 
-          <div class="chip-group">
-            <span class="chip-label">View</span>
-            <label class="chip"><input type="radio" id="view2d" name="viewMode" checked> 2D</label>
-            <label class="chip"><input type="radio" id="view3d" name="viewMode"> 3D</label>
-          </div>
-
-          <div class="chip-group" id="basemap3dGroup">
-            <span class="chip-label">Basemap</span>
-            <select id="basemap3d" class="chip-select" aria-label="3D basemap">
-              <option value="Dark">Dark</option>
-              <option value="Light">Light</option>
-              <option value="Imagery">Imagery</option>
-            </select>
-          </div>
-
           <div class="field field--search">
             <span>Find (SCID / Pole Tag)</span>
             <input id="searchPole" type="text" placeholder="e.g., SCID 1234 or TAG A-12" />
@@ -130,29 +114,15 @@
 
         <div class="map-wrap">
           <div id="map" class="map"></div>
-          <div id="map3d" class="map map3d is-hidden" aria-label="3D View"></div>
 
           <div class="map-vfx" aria-hidden="true"></div>
 
-          <div class="legend-stack">
-            <div class="legend legend--controls" aria-label="3D camera controls">
-              <div class="legend-title">3D Camera Controls</div>
-              <div class="legend-row"><span class="legend-key">Left Drag</span> Pan</div>
-              <div class="legend-row"><span class="legend-key">Right Drag</span> Orbit</div>
-              <div class="legend-row"><span class="legend-key">Wheel</span> Zoom</div>
-              <div class="legend-row"><span class="legend-key">W / A / S / D</span> Move</div>
-              <div class="legend-row"><span class="legend-key">Q / E</span> Down / Up</div>
-              <div class="legend-row"><span class="legend-key">Shift</span> Faster</div>
-              <div class="legend-row"><span class="legend-key">Ctrl</span> Slower</div>
-            </div>
-
-            <div class="legend legend--qc" aria-label="QC legend">
-              <div class="legend-row"><span class="legend-swatch legend-swatch--pass"></span> Pass</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--warn"></span> Warn</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--fail"></span> Fail</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--midspan"></span> Midspan</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--halo"></span> Comm arrangement issue</div>
-            </div>
+          <div class="legend">
+            <div class="legend-row"><span class="legend-swatch legend-swatch--pass"></span> Pass</div>
+            <div class="legend-row"><span class="legend-swatch legend-swatch--warn"></span> Warn</div>
+            <div class="legend-row"><span class="legend-swatch legend-swatch--fail"></span> Fail</div>
+            <div class="legend-row"><span class="legend-swatch legend-swatch--midspan"></span> Midspan</div>
+            <div class="legend-row"><span class="legend-swatch legend-swatch--halo"></span> Comm arrangement issue</div>
           </div>
 
           <aside id="detailsPanel" class="details-panel" aria-hidden="true">
@@ -2602,10 +2572,6 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
 
   <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- Three.js (3D View) -->
-  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-  <script src="https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
 
   <script src="./app.js"></script>
 </body>

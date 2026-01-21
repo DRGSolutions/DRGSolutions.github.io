@@ -1,380 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Katapult NESC QC Map</title>
-
-  <!-- Leaflet -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-
-  <link rel="stylesheet" href="./styles.css" />
-</head>
-<body>
-  <header class="app-header">
-    <div class="container container--wide">
-      <div class="app-header__title">
-        <h1>Katapult NESC QC Map</h1>
-        <div class="version-block muted">
-          <div class="version-block__title">Version 3.0 release 1/20/26</div>
-          <div>-NEW 3D Walkout feature! (2D is default, change view to 3D if desired)</div>
-          <div>-Comm ordering violations in yellow</div>
-          <div>-Updated midspan ROW logic from v 2.1</div>
-        </div>
-        <p class="muted">
-          <a href="Help.html" target="_blank" rel="noopener noreferrer"
-             style="color:#ef4444;font-weight:800;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:2px;font-size:14px;"
-             onclick="var w=window.open('Help.html','katapultHelp','width=980,height=820'); if(w){w.focus(); return false;} return true;">
-            HELP - HOW DO I USE THIS?
-          </a>
-        </p>
-      </div>
-    </div>
-  </header>
-
-  <main class="container container--wide">
-    <section class="card">
-      <div class="toolbar">
-        <div class="field">
-          <span>Katapult Job JSON</span>
-          <input id="fileInput" type="file" accept=".json,application/json" />
-        </div>
-
-        <div class="actions">
-          <button id="btnPreview" class="ghost" disabled>Preview Map</button>
-          <button id="btnRunQc" class="primary" disabled>Run QC</button>
-          <button id="btnReset" class="ghost" disabled>Reset</button>
-        </div>
-
-        <div class="summary-strip">
-          <div class="summary-item">
-            <div class="label">Job</div>
-            <div id="jobName" class="value">—</div>
-          </div>
-          <div class="summary-item">
-            <div class="label">Poles</div>
-            <div id="summaryPoles" class="value">—</div>
-          </div>
-          <div class="summary-item">
-            <div class="label">Midspans</div>
-            <div id="summaryMidspans" class="value">—</div>
-          </div>
-          <div class="summary-item">
-            <div class="label">Issues</div>
-            <div id="summaryIssues" class="value">—</div>
-          </div>
-        </div>
-
-        <div class="progress-wrap">
-          <div class="progress">
-            <div id="progressBar" class="progress__bar"></div>
-          </div>
-          <div id="progressLabel" class="muted" style="margin-top:6px;">—</div>
-        </div>
-      </div>
-    </section>
-
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="map">Map</button>
-      <button class="tab-btn" data-tab="rules">Rules</button>
-      <button class="tab-btn" data-tab="issues">Issues</button>
-      <button class="tab-btn" data-tab="log">Log</button>
-    </div>
-
-    <section id="tab-map" class="tab-panel active">
-      <section class="card card--flush map-card">
-        <div class="map-toolbar">
-          <div class="chip-group">
-            <span class="chip-label">Show</span>
-            <label class="chip"><input type="checkbox" id="togglePoles" checked> Poles</label>
-            <label class="chip"><input type="checkbox" id="toggleMidspans" checked> Midspans</label>
-            <label class="chip"><input type="checkbox" id="toggleSpans" checked> Span Lines</label>
-          </div>
-
-          <div class="chip-group">
-            <span class="chip-label">Labels</span>
-            <label class="chip"><input type="checkbox" id="toggleScidLabels"> SCID</label>
-          </div>
-
-          <div class="chip-group">
-            <span class="chip-label">Filter</span>
-            <label class="chip"><input type="checkbox" id="filterPass" checked> Pass</label>
-            <label class="chip"><input type="checkbox" id="filterWarn" checked> Warn</label>
-            <label class="chip"><input type="checkbox" id="filterFail" checked> Fail</label>
-          </div>
-
-          <div class="chip-group">
-            <span class="chip-label">View</span>
-            <label class="chip"><input type="radio" id="view2d" name="viewMode" checked> 2D</label>
-            <label class="chip"><input type="radio" id="view3d" name="viewMode"> 3D</label>
-          </div>
-
-          <div class="chip-group" id="basemap3dGroup">
-            <span class="chip-label">Basemap</span>
-            <select id="basemap3d" class="chip-select" aria-label="3D basemap">
-              <option value="Dark">Dark</option>
-              <option value="Light">Light</option>
-              <option value="Imagery">Imagery</option>
-            </select>
-          </div>
-
-          <div class="field field--search">
-            <span>Find (SCID / Pole Tag)</span>
-            <input id="searchPole" type="text" placeholder="e.g., SCID 1234 or TAG A-12" />
-          </div>
-
-          <div class="actions">
-            <button id="btnZoomAll" class="secondary" disabled>Zoom to All</button>
-          </div>
-        </div>
-
-        <div class="map-wrap">
-          <div id="map" class="map"></div>
-          <div id="map3d" class="map map3d is-hidden" aria-label="3D View"></div>
-
-          <div class="map-vfx" aria-hidden="true"></div>
-
-          <div class="legend-stack">
-            <div class="legend legend--controls" aria-label="3D camera controls">
-              <div class="legend-title">3D Camera Controls</div>
-              <div class="legend-row"><span class="legend-key">Left Drag</span> Pan</div>
-              <div class="legend-row"><span class="legend-key">Right Drag</span> Orbit</div>
-              <div class="legend-row"><span class="legend-key">Wheel</span> Zoom</div>
-              <div class="legend-row"><span class="legend-key">W / A / S / D</span> Move</div>
-              <div class="legend-row"><span class="legend-key">Q / E</span> Down / Up</div>
-              <div class="legend-row"><span class="legend-key">Shift</span> Faster</div>
-              <div class="legend-row"><span class="legend-key">Ctrl</span> Slower</div>
-            </div>
-
-            <div class="legend legend--qc" aria-label="QC legend">
-              <div class="legend-row"><span class="legend-swatch legend-swatch--pass"></span> Pass</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--warn"></span> Warn</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--fail"></span> Fail</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--midspan"></span> Midspan</div>
-              <div class="legend-row"><span class="legend-swatch legend-swatch--halo"></span> Comm arrangement issue</div>
-            </div>
-          </div>
-
-          <aside id="detailsPanel" class="details-panel" aria-hidden="true">
-            <div class="details-panel__header">
-              <div class="details-panel__heading">Details</div>
-              <button id="btnCloseDetails" class="icon-btn" title="Close (Esc)" aria-label="Close details">✕</button>
-            </div>
-            <div id="details" class="details">
-              <div class="muted">Load a job and click a pole or midspan marker to view violations and measured heights.</div>
-            </div>
-          </aside>
-        </div>
-      </section>
-    </section>
-
-    <section id="tab-rules" class="tab-panel">
-      <section class="card">
-        <div class="rules-header">
-          <div>
-            <h2 class="card-title">Rules</h2>
-            <p class="muted" style="margin:6px 0 0;">
-              Defaults are based on the logic you provided (NESC-first). Adjust values to apply stricter regional or utility standards.
-              Changes re-run QC instantly (no re-upload required).
-            </p>
-          </div>
-          <div class="actions">
-            <button id="btnResetRules" class="ghost" disabled>Reset Rules to NESC Defaults</button>
-          </div>
-        </div>
-
-        <div class="rules-grid">
-          <div class="rule-card">
-            <h3>Pole Rules</h3>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Lowest comm attachment (ft/in)</span>
-                <input id="rulePoleMinAttach" type="text" placeholder="16' 0&quot;" />
-              </label>
-              <label class="field">
-                <span>Comms separation (different companies, inches)</span>
-                <input id="rulePoleCommSepDiff" type="number" min="0" step="1" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Comms separation (same company, inches)</span>
-                <input id="rulePoleCommSepSame" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>Non-ADSS comms to lowest power separation (inches)</span>
-                <input id="rulePoleCommToPower" type="number" min="0" step="1" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>ADSS comms to lowest power separation (inches)</span>
-                <input id="rulePoleAdssCommToPower" type="number" min="0" step="1" />
-              </label>
-              <div class="field">
-                <span>How this is applied</span>
-                <div class="muted" style="line-height:1.35;">
-                  When the highest comm on a pole is identified as ADSS, the comm-to-power check uses this value instead of the non-ADSS separation.
-                </div>
-              </div>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Comms to street light separation (inches)</span>
-                <input id="rulePoleCommToStreet" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>Moved-hole buffer (inches)</span>
-                <input id="rulePoleHoleBuffer" type="number" min="0" step="1" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="toggle">
-                <input id="rulePoleEnforceAdss" type="checkbox" />
-                <span>Require ADSS to be the highest comm</span>
-              </label>
-              <label class="toggle">
-                <input id="rulePoleEnforceEquipMove" type="checkbox" />
-                <span>Restrict equipment movement (street lights allowed)</span>
-              </label>
-              <label class="toggle">
-                <input id="rulePoleEnforcePowerOrder" type="checkbox" />
-                <span>Enforce neutral/secondary ordering rule</span>
-              </label>
-              <label class="toggle">
-                <input id="rulePoleWarnMissingIds" type="checkbox" />
-                <span>Warn if Pole Spec / Pole Tag / SCID missing</span>
-              </label>
-            </div>
-          </div>
-
-          <div class="rule-card">
-            <h3>Midspan Rules</h3>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Default lowest comm (ft/in)</span>
-                <input id="ruleMidMinDefault" type="text" placeholder="15' 6&quot;" />
-              </label>
-              <label class="field">
-                <span>Pedestrian lowest comm (ft/in)</span>
-                <input id="ruleMidMinPed" type="text" placeholder="9' 6&quot;" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Highway lowest comm (ft/in)</span>
-                <input id="ruleMidMinHwy" type="text" placeholder="18' 0&quot;" />
-              </label>
-              <label class="field">
-                <span>Farm access lowest comm (ft/in)</span>
-                <input id="ruleMidMinFarm" type="text" placeholder="18' 0&quot;" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Midspan comm separation default (inches)</span>
-                <input id="ruleMidCommSep" type="number" min="0" step="1" />
-              </label>
-              <label class="field">
-                <span>Midspan comm-to-power separation (inches)</span>
-                <input id="ruleMidCommToPower" type="number" min="0" step="1" />
-              </label>
-            </div>
-            <div class="rule-row">
-              <label class="field">
-                <span>ADSS midspan comm-to-power separation (inches)</span>
-                <input id="ruleMidAdssCommToPower" type="number" min="0" step="1" />
-              </label>
-              <div class="field">
-                <span>How this is applied</span>
-                <div class="muted" style="line-height:1.35;">
-                  When the highest comm in a midspan photo is identified as ADSS, the comm-to-power check uses this value instead of the default midspan comm-to-power separation.
-                </div>
-              </div>
-            </div>
-
-            <div class="rule-row">
-              <label class="field">
-                <span>Installing company (applies stricter comm separation)</span>
-                <select id="ruleInstallingCompany"></select>
-              </label>
-              <label class="field">
-                <span>Installing company comm separation (inches)</span>
-                <input id="ruleMidCommSepInstall" type="number" min="0" step="1" />
-              </label>
-            </div>
-
-            <div class="rule-row">
-              <label class="toggle">
-                <input id="ruleMidEnforceAdss" type="checkbox" />
-                <span>Require ADSS to be the highest comm (midspan)</span>
-              </label>
-              <label class="toggle">
-                <input id="ruleMidWarnMissingRow" type="checkbox" />
-                <span>Warn when ROW type is missing (defaults to “Default”)</span>
-              </label>
-            </div>
-          </div>
-        </div>
-      </section>
-    </section>
-
-    <section id="tab-issues" class="tab-panel">
-      <section class="card">
-        <div class="issues-toolbar">
-          <div class="chip-group">
-            <span class="chip-label">Severity</span>
-            <label class="chip"><input type="checkbox" id="issuesFail" checked> Fail</label>
-            <label class="chip"><input type="checkbox" id="issuesWarn" checked> Warn</label>
-          </div>
-
-          <div class="field field--search">
-            <span>Search</span>
-            <input id="issuesSearch" type="text" placeholder="Search rule, pole, company, height…" />
-          </div>
-
-          <div class="actions">
-            <button id="btnExportIssues" class="secondary" disabled>Export Issues CSV</button>
-          </div>
-        </div>
-
-        <div class="table-wrap">
-          <table class="table" id="issuesTable">
-            <thead>
-              <tr>
-                <th>Severity</th>
-                <th>Type</th>
-                <th>Name</th>
-                <th>Rule</th>
-                <th>Message</th>
-              </tr>
-            </thead>
-            <tbody id="issuesTbody">
-              <tr><td colspan="5" class="muted">No issues yet.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-    </section>
-
-    <section id="tab-log" class="tab-panel">
-      <section class="card">
-        <h2 class="card-title">Log</h2>
-        <div id="logBox" class="log"></div>
-      </section>
-    </section>
-  </main>
-
-  <!-- Inline worker source for file:// compatibility -->
-  <script id="worker-js" type="text/plain">
 /*
   Web Worker: parses Katapult Job JSON and returns a normalized structure ready for Excel creation.
 
@@ -622,9 +245,17 @@ self.onmessage = async (ev) => {
               const baseH = getHeightInches(w);
               if (baseH == null) continue;
 
+              // IMPORTANT:
+              // Katapult midspan effective moves can be the result of interpolating endpoint moves,
+              // which yields floating-point inches (e.g., 11.9999989"). For QC, field crews and
+              // most construction standards are evaluated at whole-inch resolution.
+              //
+              // Do NOT round the measured height before applying move deltas.
+              // Rounding first can introduce a full-inch error when the measured height carries
+              // fractional inches and the move delta is also fractional.
               const baseRounded = Math.round(baseH);
-              const move = getMidspanWireMoveInches(w, wireId, pf, nodeA, nodeB, distA, distB);
-              const proposed = baseRounded + move;
+              const move = getMidspanWireMoveInches(w, wireId, photoId, pf, nodeA, nodeB, distA, distB);
+              const proposedRounded = Math.round(baseH + move);
 
               const t = traces[traceId] || {};
               const owner = t.company || "";
@@ -633,7 +264,7 @@ self.onmessage = async (ev) => {
               const label = normalizeCableType(t, baseRounded);
 
               point.measures.push({
-                id: `${String(traceId)}|${String(wireId)}|${String(proposed)}`,
+                id: `${String(traceId)}|${String(wireId)}|${String(proposedRounded)}`,
                 traceId: String(traceId),
                 owner: owner ? String(owner) : "",
                 traceType,
@@ -641,9 +272,9 @@ self.onmessage = async (ev) => {
                 label,
                 wireId: String(wireId),
                 existingIn: baseRounded,
-                proposedIn: proposed,
+                proposedIn: proposedRounded,
                 existingHeight: inchesToFtIn(baseRounded),
-                proposedHeight: inchesToFtIn(proposed),
+                proposedHeight: inchesToFtIn(proposedRounded),
               });
             }
 
@@ -704,7 +335,9 @@ progress(42, "Processing pole attachments…");
         if (!pf || typeof pf !== "object") continue;
         // Do NOT skip score==0 blocks: some equipment (e.g., drip loops) can be nested in
         // photofirst_data and won't register in the shallow scoring heuristic.
-        candidates.push({ pid, pf, score });
+        const meta = nodePhotos && nodePhotos[pid];
+        const isMain = !!(meta && typeof meta === "object" && meta.association === "main");
+        candidates.push({ pid, pf, score, isMain });
       }
 
       // Fallback: if nothing scored, try the best-guess photo anyway.
@@ -713,11 +346,20 @@ progress(42, "Processing pole attachments…");
         const p = photos[bestPhotoId];
         const pf = p && p.photofirst_data ? p.photofirst_data : null;
         if (pf && typeof pf === "object") {
-          candidates.push({ pid: bestPhotoId, pf, score: 0 });
+          const meta = nodePhotos && nodePhotos[bestPhotoId];
+          const isMain = !!(meta && typeof meta === "object" && meta.association === "main");
+          candidates.push({ pid: bestPhotoId, pf, score: 0, isMain });
         }
       }
 
-      candidates.sort((a, b) => (b.score || 0) - (a.score || 0));
+      candidates.sort((a, b) => {
+        const am = a && a.isMain ? 1 : 0;
+        const bm = b && b.isMain ? 1 : 0;
+        if (bm !== am) return bm - am;
+        const ds = (b.score || 0) - (a.score || 0);
+        if (ds !== 0) return ds;
+        return String(a.pid || '').localeCompare(String(b.pid || ''));
+      });
 
       // Accumulate equipment across all photos so we can output a single merged row per trace.
       const byTrace = {};
@@ -1166,6 +808,31 @@ function getBestPolePhotoId(photoMap, photos) {
 //  Pole extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
+function combineParentAndWireMoves(parentMv, wireMv) {
+  // Katapult can represent the *same* make-ready delta at multiple levels in the
+  // photofirst object graph (e.g., insulator.mr_move AND wire.mr_move).
+  //
+  // If we blindly sum those values, proposed heights can be overstated (double-counted).
+  //
+  // Heuristic:
+  // - If both parent and wire moves are non-zero and in the same direction, and the
+  //   wire move magnitude is >= the parent move magnitude (within a small tolerance),
+  //   treat the wire move as the already-resolved total and ignore the parent move.
+  // - Otherwise, treat the wire move as an additional delta and sum.
+  const p = (typeof parentMv === 'number' && Number.isFinite(parentMv)) ? parentMv : 0;
+  const w = (typeof wireMv === 'number' && Number.isFinite(wireMv)) ? wireMv : 0;
+  if (!p) return w;
+  if (!w) return p;
+
+  const sameDir = Math.sign(p) === Math.sign(w);
+  const tol = 0.75; // inches
+
+  if (sameDir && (Math.abs(w) >= (Math.abs(p) - tol))) {
+    return w;
+  }
+  return p + w;
+}
+
 function extractWireRows(pf, traces, rows, seenKey, photoId) {
   // Direct wires (photofirst_data.wire)
   const direct = pf.wire || {};
@@ -1198,7 +865,7 @@ function extractWireRows(pf, traces, rows, seenKey, photoId) {
 
     for (const [wireId, child] of Object.entries(insObj._children.wire || {})) {
       const wireMv = getWireMoveInches(child, wireId, pf, photoId);
-      const prop = h + mv + wireMv;
+      const prop = h + combineParentAndWireMoves(mv, wireMv);
       const traceId = child && child._trace ? child._trace : null;
       if (!traceId) continue;
       const t = traces[traceId] || {};
@@ -1221,11 +888,11 @@ function extractWireRows(pf, traces, rows, seenKey, photoId) {
     const h = getHeightInches(msgObj);
     if (h == null) continue;
     const mv = getMoveInches(msgObj);
-    const prop = h + mv;
-
-    for (const child of Object.values(msgObj._children.wire || {})) {
+    for (const [wireId, child] of Object.entries(msgObj._children.wire || {})) {
       const traceId = child && child._trace ? child._trace : null;
       if (!traceId) continue;
+      const wireMv = getWireMoveInches(child, wireId, pf, photoId);
+      const prop = h + combineParentAndWireMoves(mv, wireMv);
       const t = traces[traceId] || {};
       const owner = t.company || "";
       const comments = normalizeCableType(t, h);
@@ -1250,13 +917,14 @@ function extractWireRows(pf, traces, rows, seenKey, photoId) {
     // Wires directly under arm (rare)
     const armWire = armObj._children && armObj._children.wire ? armObj._children.wire : null;
     if (armWire && typeof armWire === "object") {
-      for (const child of Object.values(armWire)) {
+      for (const [wireId, child] of Object.entries(armWire)) {
         const traceId = child && child._trace ? child._trace : null;
         if (!traceId) continue;
+        const wireMv = getWireMoveInches(child, wireId, pf, photoId);
         const t = traces[traceId] || {};
         const owner = t.company || "";
         const comments = normalizeCableType(t, armH);
-        const row = makeRow({ traceId, category: "Wire", owner, existingIn: armH, proposedIn: armH + armMv, comments });
+        const row = makeRow({ traceId, category: "Wire", owner, existingIn: armH, proposedIn: armH + combineParentAndWireMoves(armMv, wireMv), comments });
         const key = `Wire|${traceId}|${Math.round(row._sortIn)}`;
         if (!seenKey.has(key)) {
           seenKey.add(key);
@@ -1280,7 +948,7 @@ function extractWireRows(pf, traces, rows, seenKey, photoId) {
 
       for (const [wireId, child] of Object.entries(insObj._children.wire || {})) {
         const wireMv = getWireMoveInches(child, wireId, pf, photoId);
-        const prop = baseH + totalMv + wireMv;
+        const prop = baseH + combineParentAndWireMoves(totalMv, wireMv);
         const traceId = child && child._trace ? child._trace : null;
         if (!traceId) continue;
         const t = traces[traceId] || {};
@@ -1398,6 +1066,8 @@ function parsePoleHeightFeet(specString) {
   if (!s.trim()) return null;
   const nums = Array.from(s.matchAll(/\d{2,3}|\d/g)).map(m => parseInt(m[0], 10)).filter(n => Number.isFinite(n));
   if (!nums.length) return null;
+  // Typical pole heights: 2-digit values like 30, 35, 40, 45...
+  // Specs may also include class numbers (e.g., 2, 3, 4), so we prefer the largest "reasonable" value.
   const candidates = nums.filter(n => n >= 20 && n <= 120);
   if (!candidates.length) return null;
   return Math.max(...candidates);
@@ -2278,18 +1948,27 @@ function getWireMoveInches(wireObj, wireId, pf, photoId) {
 function chooseEndpointEffectiveMove(effList, nodePhotoMap) {
   if (!effList || !effList.length) return null;
 
-  // Prefer the endpoint's main photo if it appears in `_effective_moves`.
+  const finite = effList
+    .filter(e => e && typeof e.mv === 'number' && Number.isFinite(e.mv));
+
+  if (!finite.length) return null;
+
+  const nonZero = finite.filter(e => e.mv !== 0);
+
+  // Prefer the endpoint's main photo if it appears in `_effective_moves`,
+  // but avoid accidentally selecting a zero-move when a non-zero exists.
   const mainPid = nodePhotoMap ? getMainPhotoId(nodePhotoMap) : null;
   if (mainPid) {
-    const m = effList.find(e => e && e.pid === mainPid);
-    if (m && typeof m.mv === 'number' && Number.isFinite(m.mv)) return m.mv;
+    const m = finite.find(e => e && e.pid === mainPid);
+    if (m && m.mv !== 0) return m.mv;
   }
 
   // Otherwise prefer the most recently taken photo (when available).
-  if (PHOTOS_MAP && typeof PHOTOS_MAP === 'object') {
+  const pickByRecency = (cands) => {
+    if (!PHOTOS_MAP || typeof PHOTOS_MAP !== 'object') return null;
     let bestMv = null;
     let bestT = null;
-    for (const e of effList) {
+    for (const e of cands) {
       if (!e || !e.pid) continue;
       const p = PHOTOS_MAP[e.pid];
       const tRaw = p && (p.date_taken || p.dateTaken || p.timestamp || (p._created && p._created.timestamp));
@@ -2300,51 +1979,93 @@ function chooseEndpointEffectiveMove(effList, nodePhotoMap) {
         bestMv = e.mv;
       }
     }
-    if (bestT != null) return bestMv;
+    return (bestT != null) ? bestMv : null;
+  };
+
+  // Prefer most recent non-zero when possible
+  if (nonZero.length) {
+    const rec = pickByRecency(nonZero);
+    if (rec != null) return rec;
   }
 
-  // Last resort: choose the move with the largest absolute magnitude.
-  let best = effList[0] ? effList[0].mv : null;
-  for (const e of effList) {
-    if (!e || typeof e.mv !== 'number' || !Number.isFinite(e.mv)) continue;
-    if (best == null || Math.abs(e.mv) > Math.abs(best)) best = e.mv;
+  // Then prefer most recent (even if 0) as a stable fallback
+  const recAny = pickByRecency(finite);
+  if (recAny != null && (recAny !== 0 || !nonZero.length)) return recAny;
+
+  // Last resort: choose the move with the largest absolute magnitude among non-zero values,
+  // otherwise return 0.
+  if (nonZero.length) {
+    let best = nonZero[0].mv;
+    for (const e of nonZero) {
+      if (!e || typeof e.mv !== 'number' || !Number.isFinite(e.mv)) continue;
+      if (Math.abs(e.mv) > Math.abs(best)) best = e.mv;
+    }
+    return best;
   }
-  return best;
+
+  return 0;
 }
 
-function getMidspanWireMoveInches(wireObj, wireId, pf, nodeA, nodeB, distA, distB) {
+function getMidspanWireMoveInches(wireObj, wireId, photoId, pf, nodeA, nodeB, distA, distB) {
   if (!wireObj || typeof wireObj !== 'object') return 0;
 
-  // 1) Manual slack / explicit midspan MR move
-  let manual = moveValueToInches(wireObj.mr_move);
-  if (manual == null) {
+  // IMPORTANT:
+  // In many Katapult exports, `wire.mr_move` on a midspan measurement photo is already the
+  // fully-resolved move at that measured point (it may already include endpoint interpolation
+  // that would otherwise be represented in `_effective_moves`).
+  //
+  // When present and non-zero, treat it as authoritative to avoid double-counting.
+  const directResolved = moveValueToInches(wireObj.mr_move);
+  if (directResolved != null && Number.isFinite(directResolved) && directResolved !== 0) {
+    return directResolved;
+  }
+
+  // 1) Manual slack / explicit midspan MR move.
+  // Some exports will populate mr_move as 0 but carry a non-zero value in last_mr_state.mr_data.
+  let manual = directResolved;
+
+  if (manual == null || manual === 0) {
     const lms = pf && pf.last_mr_state;
     const mr = lms && lms.mr_data;
     if (mr && wireId) {
       const key = `wire:${wireId}:mr_move`;
       if (mr[key] !== undefined && mr[key] !== null && String(mr[key]).trim() !== '') {
-        manual = moveValueToInches(mr[key]);
+        const fromMr = moveValueToInches(mr[key]);
+        if (fromMr != null && (fromMr !== 0 || manual == null)) manual = fromMr;
       }
     }
   }
   if (manual == null) manual = 0;
 
-  // 2) Endpoint effective moves
+  // 2) Endpoint effective moves (or resolved effective move for this midspan photo).
   const eff = wireObj._effective_moves;
   if (!eff || typeof eff !== 'object') return manual;
+
+  // If Katapult already computed an effective move at THIS midspan photo id, prefer it.
+  if (photoId && eff[photoId] !== undefined && eff[photoId] !== null && String(eff[photoId]).trim() !== '') {
+    const direct = moveValueToInches(eff[photoId]);
+    if (direct != null && Number.isFinite(direct)) {
+      return manual + direct;
+    }
+  }
 
   const photosA = (nodeA && nodeA.photos && typeof nodeA.photos === 'object') ? nodeA.photos : null;
   const photosB = (nodeB && nodeB.photos && typeof nodeB.photos === 'object') ? nodeB.photos : null;
 
   const listA = [];
   const listB = [];
+
   let anyMapped = false;
   let sumAll = 0;
+  let countAll = 0;
+  let sumOther = 0;
 
   for (const [pid, raw] of Object.entries(eff)) {
     const mv = moveValueToInches(raw);
     if (mv == null || !Number.isFinite(mv)) continue;
+
     sumAll += mv;
+    countAll += 1;
 
     const inA = !!(photosA && photosA[pid]);
     const inB = !!(photosB && photosB[pid]);
@@ -2359,6 +2080,9 @@ function getMidspanWireMoveInches(wireObj, wireId, pf, nodeA, nodeB, distA, dist
       listB.push({ pid, mv });
       continue;
     }
+
+    // Unmapped contributions can occur in some exports; include them additively later.
+    sumOther += mv;
   }
 
   const aSel = chooseEndpointEffectiveMove(listA, photosA);
@@ -2366,22 +2090,25 @@ function getMidspanWireMoveInches(wireObj, wireId, pf, nodeA, nodeB, distA, dist
   const a = (aSel != null && Number.isFinite(aSel)) ? aSel : 0;
   const b = (bSel != null && Number.isFinite(bSel)) ? bSel : 0;
 
-  // If we can map moves to endpoints AND we have a usable along-span position, use a weighted interpolation.
-  const haveDist = (
-    typeof distA === 'number' && Number.isFinite(distA) &&
-    typeof distB === 'number' && Number.isFinite(distB) &&
-    (distA + distB) > 0
-  );
+  const mappedA = (aSel != null && Number.isFinite(aSel));
+  const mappedB = (bSel != null && Number.isFinite(bSel));
 
   let effContribution;
-  if (anyMapped && haveDist) {
-    const x = distA / (distA + distB); // 0 at A, 1 at B
-    effContribution = (a * (1 - x)) + (b * x);
-  } else if (anyMapped) {
+  if (mappedA && mappedB) {
+    // Midspan measurement points are treated as the midpoint for MR interpolation.
+    // This avoids GPS jitter / photo-location artifacts producing non-midpoint weighting.
     effContribution = (a + b) / 2;
+  } else if (mappedA) {
+    effContribution = a;
+  } else if (mappedB) {
+    effContribution = b;
   } else {
-    effContribution = sumAll / 2;
+    // If we cannot map endpoint photos, assume the available entries are endpoint moves and use
+    // a simple average across them. This avoids halving a single-entry dataset.
+    effContribution = (countAll > 0) ? (sumAll / countAll) : 0;
   }
+
+  if (anyMapped && sumOther) effContribution += sumOther;
 
   return manual + effContribution;
 }
@@ -2597,16 +2324,3 @@ function haversineMeters(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
-
-  </script>
-
-  <!-- Leaflet -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- Three.js (3D View) -->
-  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-  <script src="https://unpkg.com/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
-
-  <script src="./app.js"></script>
-</body>
-</html>
