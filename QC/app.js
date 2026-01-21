@@ -756,6 +756,9 @@
       if (camera.isPerspectiveCamera) {
         const offset = v3tmp.copy(camera.position).sub(scope.target);
         let targetDistance = offset.length();
+        // Prevent pan from becoming unusably slow when zoomed in very close.
+        // The 3D world units used throughout this view are feet.
+        targetDistance = Math.max(200, targetDistance);
         // Convert to viewport height at the target distance.
         targetDistance *= Math.tan((camera.fov / 2) * (Math.PI / 180));
 
