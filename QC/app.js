@@ -700,7 +700,7 @@
     sphericalDelta.theta = 0;
     sphericalDelta.phi = 0;
     const panOffset = new THREE.Vector3();
-    let zoomScale = 1;
+    let zoomDelta = 0;
 
     const EPS = 1e-6;
 
@@ -741,11 +741,12 @@
     }
 
     updateSphericalFromCamera();
-
     function getZoomScaleFromWheel(deltaY) {
-      // deltaY is typically ~100 per wheel notch.
-      const s = 1 + (deltaY * scope.zoomSpeed);
-      return Math.min(5, Math.max(0.2, s));
+      // Normalize wheel delta to keep zoom feel consistent across devices.
+      const dy = Number(deltaY || 0);
+      if (!isFinite(dy) || dy === 0) return 0;
+      // Some devices emit very large deltas; clamp to avoid sudden jumps.
+      return Math.max(-1200, Math.min(1200, dy));
     }
 
     function pan(dx, dy) {
@@ -825,7 +826,7 @@
     }
 
     function onWheel(e) {
-      zoomScale *= getZoomScaleFromWheel(e.deltaY);
+      zoomDelta += getZoomScaleFromWheel(e.deltaY);
       e.preventDefault();
     }
 
@@ -854,7 +855,27 @@
       const maxPhi = Math.min(scope.maxPolarAngle, Math.PI - EPS);
       spherical.phi = Math.max(EPS, Math.min(maxPhi, spherical.phi));
 
-      spherical.radius *= zoomScale;
+      if (zoomDelta !== 0) {
+        const r = Math.max(1e-6, spherical.radius);
+        // Increase zoom step as distance grows so the view stays responsive
+        // across both small and very large job extents.
+        const rMin = 50;
+        const rMax = Math.max(rMin * 2, Number(scope.maxDistance || 250000));
+        const logMin = Math.log10(rMin);
+        const logMax = Math.log10(rMax);
+        const tt = (Math.log10(r) - logMin) / (logMax - logMin);
+        const k = Math.max(0, Math.min(1, tt));
+
+        const baseFrac = Math.min(0.25, Math.max(0.02, 100 * Number(scope.zoomSpeed || 0.00085)));
+        const frac = baseFrac * (1 + 2 * k); // near: baseFrac, far: ~3x
+        const baseStep = r * frac;
+
+        const minStep = (zoomDelta > 0) ? 15 : 6;
+        const maxStep = 80000;
+        const stepPerNotch = Math.min(maxStep, Math.max(minStep, baseStep));
+        const notches = zoomDelta / 100;
+        spherical.radius += notches * stepPerNotch;
+      }
       spherical.radius = Math.max(scope.minDistance, Math.min(scope.maxDistance, spherical.radius));
 
       scope.target.add(panOffset);
@@ -906,6 +927,16 @@
         }
       }
 
+
+      // Prevent navigating under the basemap/ground plane (y≈0).
+      // Keeps the 3D experience stable and avoids inverted/underside views.
+      const MIN_GROUND_Y = 0.04;
+      if (scope.target.y < MIN_GROUND_Y) {
+        const dy = MIN_GROUND_Y - scope.target.y;
+        scope.target.y += dy;
+        camera.position.y += dy;
+      }
+
       if (scope.enableDamping) {
         sphericalDelta.theta *= (1 - scope.dampingFactor);
         sphericalDelta.phi *= (1 - scope.dampingFactor);
@@ -916,7 +947,7 @@
         panOffset.set(0, 0, 0);
       }
 
-      zoomScale = 1;
+      zoomDelta = 0;
     };
 
     this.dispose = function dispose() {
@@ -3981,6 +4012,45 @@
     const wantWarn = els.issuesWarn.checked;
     const q = normalizeStr(els.issuesSearch.value || "").trim();
 
+    // Midspans in the Issues tab should be labeled by their connected pole SCID(s)
+    // rather than only the raw JSON midspan ID.
+    const poleById = new Map();
+    for (const p of (model && Array.isArray(model.poles) ? model.poles : [])) {
+      if (!p) continue;
+      if (p.poleId == null) continue;
+      poleById.set(String(p.poleId), p);
+    }
+
+    const midById = new Map();
+    for (const ms of (model && Array.isArray(model.midspanPoints) ? model.midspanPoints : [])) {
+      if (!ms) continue;
+      if (ms.midspanId == null) continue;
+      midById.set(String(ms.midspanId), ms);
+    }
+
+    function poleScidByPoleId(poleId) {
+      const key = String(poleId || "");
+      const p = poleById.get(key);
+      return String((p && (p.scid || p.displayName || p.poleTag)) || key);
+    }
+
+    function midspanEntityLabel(issue) {
+      if (!issue) return "Midspan";
+      const ms = midById.get(String(issue.entityId || ""));
+      if (!ms) return String(issue.entityName || issue.entityId || "Midspan");
+
+      const aPoleId = String(ms.aPoleId || "");
+      const bPoleId = String(ms.bPoleId || "");
+
+      const scids = [];
+      if (aPoleId) scids.push(poleScidByPoleId(aPoleId));
+      if (bPoleId && bPoleId !== aPoleId) scids.push(poleScidByPoleId(bPoleId));
+
+      if (!scids.length) return String(issue.entityName || issue.entityId || "Midspan");
+      if (scids.length === 1) return `Midspan ${scids[0]}`;
+      return `Midspan ${scids[0]} - ${scids[1]}`;
+    }
+
     const rows = [];
     for (const iss of qcResults.issues || []) {
       if (iss.severity === "FAIL" && !wantFail) continue;
@@ -4000,7 +4070,10 @@
     els.issuesTbody.innerHTML = rows.map((iss) => {
       const sev = iss.severity === "FAIL" ? "FAIL" : "WARN";
       const sevClass = iss.severity === "FAIL" ? "fail" : "warn";
-      const name = escapeHtml(iss.entityType === "pole" ? (iss.entityName || iss.entityId) : (iss.entityName || "Midspan"));
+      const displayName = (iss.entityType === "pole")
+        ? (iss.entityName || iss.entityId)
+        : (iss.entityType === "midspan" ? midspanEntityLabel(iss) : (iss.entityName || "Midspan"));
+      const name = escapeHtml(displayName);
       const msg = escapeHtml(iss.message);
 
       return `

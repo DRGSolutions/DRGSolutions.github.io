@@ -1041,7 +1041,11 @@ function normalizeRowType(raw) {
   if (s.includes("farm")) return "farm";
 
   // Pedestrian access: must explicitly say pedestrian/ped.
-  if (/\bpedestrian\b/.test(s) || /\bped\b/.test(s)) return "pedestrian";
+  // "Yard" should be treated the same as pedestrian.
+  if (/\bpedestrian\b/.test(s) || /\bped\b/.test(s) || /\byard\b/.test(s)) return "pedestrian";
+
+  // "Road" / "Roadway" should be treated the same as "Street" (default).
+  if (/\broadway\b/.test(s) || /\broad\b/.test(s)) return "default";
 
   // Driveway / Parking Lot / anything else defaults to the 15' 6" standard.
   return "default";
