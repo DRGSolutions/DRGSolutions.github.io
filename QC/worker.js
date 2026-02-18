@@ -292,6 +292,8 @@ self.onmessage = async (ev) => {
 progress(42, "Processing pole attachments…");
 
     const polesOut = [];
+    const guyLinesOut = [];
+    const guyLineSeen = new Set();
     const orderedPoleIds = orderPoleIds(poleIdsToProcess, nodes, connections);
     const totalPoles = orderedPoleIds.length;
 
@@ -380,6 +382,8 @@ progress(42, "Processing pole attachments…");
             const h = getHeightInches(g);
             if (h == null) continue;
             const move = getMoveInches(g);
+
+            // Row output (QC)
             const row = makeRow(traceId, traces[traceId] || {}, h, h + move, { category: "Guy" });
             const sortIn = row.sortHeightInches;
             const key = `Guy|${traceId}|${Math.round(sortIn)}`;
@@ -387,6 +391,44 @@ progress(42, "Processing pole attachments…");
               seenKey.add(key);
               rows.push(row);
             }
+
+            // 3D visualization output: downguy / guying geometry.
+            // We include both existing + proposed heights and attempt to resolve the anchor location.
+            try {
+              const anchorId = (g && g.anchor_id != null) ? String(g.anchor_id) : "";
+              let anchorLat = null;
+              let anchorLon = null;
+              let anchorType = "";
+              if (anchorId && nodes && nodes[anchorId]) {
+                const an = nodes[anchorId];
+                anchorLat = (an && an.latitude != null) ? parseNumberMaybe(an.latitude) : null;
+                anchorLon = (an && an.longitude != null) ? parseNumberMaybe(an.longitude) : null;
+                anchorType = getNodeType(an) || "";
+              }
+
+              const guyType = (g && g.guying_type != null) ? String(g.guying_type) : "";
+              const owner = (traces[traceId] && traces[traceId].company) ? String(traces[traceId].company) : "";
+
+              const existingIn = h;
+              const proposedIn = h + move;
+
+              const gKey = `GuyLine|${poleId}|${traceId}|${anchorId}|${Math.round(existingIn)}|${Math.round(proposedIn)}`;
+              if (!guyLineSeen.has(gKey)) {
+                guyLineSeen.add(gKey);
+                guyLinesOut.push({
+                  poleId: String(poleId),
+                  traceId: String(traceId),
+                  anchorId,
+                  anchorType,
+                  anchorLat,
+                  anchorLon,
+                  guyType,
+                  owner,
+                  existingIn,
+                  proposedIn,
+                });
+              }
+            } catch (_) {}
           }
         }
 
@@ -456,6 +498,8 @@ progress(42, "Processing pole attachments…");
             const move = getMoveInches(g.rep);
             const proposed = existing + move;
 
+            const bearingDeg = extractBearingDeg(g.rep);
+
             let label = normalizeEquipmentLabel(t, g.rep, existing);
 
             // If an equipment trace has multiple height points, label them clearly.
@@ -465,7 +509,7 @@ progress(42, "Processing pole attachments…");
               label = `${label} (Pt ${gi + 1})`;
             }
 
-            const row = makeRow({ traceId: tid, category: "Equipment", owner, existingIn: existing, proposedIn: proposed, comments: label });
+            const row = makeRow({ traceId: tid, category: "Equipment", owner, existingIn: existing, proposedIn: proposed, comments: label, bearingDeg });
             const sortIn = row._sortIn;
             const key = `Equipment|${tid}|${Math.round(sortIn)}`;
             if (!seenKey.has(key)) {
@@ -566,6 +610,7 @@ polesOut.push({
       poles: polesOut,
       midspanPoints: midspanPointsOut,
       spans: spanLinesOut,
+      guyLines: guyLinesOut,
       companies: Array.from(new Set(Object.values(traces).map(t => (t && t.company ? String(t.company) : "")).filter(Boolean))).sort(),
     };
 
@@ -1811,6 +1856,56 @@ function getMoveInches(obj) {
   }
 
   return mr != null ? mr : 0;
+}
+
+function normalizeBearingDeg(deg) {
+  if (deg == null || Number.isNaN(deg)) return null;
+  let d = Number(deg);
+  if (!Number.isFinite(d)) return null;
+  // Normalize to [0,360)
+  d = ((d % 360) + 360) % 360;
+  return d;
+}
+
+function extractBearingDeg(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  const tryParse = (v) => {
+    if (v == null) return null;
+    if (typeof v === "number") return normalizeBearingDeg(v);
+    if (typeof v === "string") {
+      const m = /(-?\d+(?:\.\d+)?)/.exec(v);
+      if (!m) return null;
+      return normalizeBearingDeg(parseFloat(m[1]));
+    }
+    return null;
+  };
+
+  const keys = [
+    "bearing",
+    "bearing_deg",
+    "bearingDeg",
+    "azimuth",
+    "heading",
+    "direction_bearing",
+    "directionBearing",
+    "angle",
+    "orientation",
+  ];
+
+  for (const k of keys) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    const parsed = tryParse(obj[k]);
+    if (parsed != null) return parsed;
+  }
+
+  // Some exports may nest direction under an "orientation" object.
+  if (obj.orientation && typeof obj.orientation === "object") {
+    const nested = extractBearingDeg(obj.orientation);
+    if (nested != null) return nested;
+  }
+
+  return null;
 }
 
 function inchesToFtIn(inches) {

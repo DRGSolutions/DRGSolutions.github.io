@@ -23,6 +23,7 @@
       enforceAdssHighest: true,
       enforceEquipmentMove: true,
       enforcePowerOrder: true,
+      enforceNeutralSecondaryBelowTransformer: false,
       warnMissingPoleIdentifiers: true,
     },
     midspan: {
@@ -54,6 +55,9 @@
     btnPreview: $("btnPreview"),
     btnRunQc: $("btnRunQc"),
     btnReset: $("btnReset"),
+    btnSaveRulesFile: $("btnSaveRulesFile"),
+    btnLoadRulesFile: $("btnLoadRulesFile"),
+    rulesFileInput: $("rulesFileInput"),
     btnResetRules: $("btnResetRules"),
     btnZoomAll: $("btnZoomAll"),
 
@@ -79,7 +83,8 @@
     filterPass: $("filterPass"),
     filterWarn: $("filterWarn"),
     filterFail: $("filterFail"),
-    searchPole: $("searchPole"),
+	    searchScid: $("searchScid"),
+	    searchPoleTag: $("searchPoleTag"),
 
     detailsPanel: $("detailsPanel"),
     btnCloseDetails: $("btnCloseDetails"),
@@ -96,12 +101,14 @@
     rulePoleEnforceAdss: $("rulePoleEnforceAdss"),
     rulePoleEnforceEquipMove: $("rulePoleEnforceEquipMove"),
     rulePoleEnforcePowerOrder: $("rulePoleEnforcePowerOrder"),
+    rulePoleNeutralSecondaryBelowTransformer: $("rulePoleNeutralSecondaryBelowTransformer"),
     rulePoleWarnMissingIds: $("rulePoleWarnMissingIds"),
 
     ruleMidMinDefault: $("ruleMidMinDefault"),
     ruleMidMinPed: $("ruleMidMinPed"),
     ruleMidMinHwy: $("ruleMidMinHwy"),
     ruleMidMinFarm: $("ruleMidMinFarm"),
+    ruleMidMinRail: $("ruleMidMinRail"),
     ruleMidCommSep: $("ruleMidCommSep"),
     ruleMidCommToPower: $("ruleMidCommToPower"),
     ruleMidAdssCommToPower: $("ruleMidAdssCommToPower"),
@@ -670,16 +677,23 @@
     this.dampingFactor = 0.06;
     this.screenSpacePanning = true;
 
-    this.minDistance = 10;
+    // Allow closer inspections (visualization only).
+    // Keeping this small also reduces the feeling of a hard stop when zooming in.
+    this.minDistance = 0.001;
     this.maxDistance = 250000;
-    this.maxPolarAngle = Math.PI * 0.495;
+    this.maxPolarAngle = Math.PI;
 
-    // Speed tuning (visualization only): slightly slower by default to avoid overly
-    // sensitive navigation on large aerial extents.
-    this.rotateSpeed = 0.0015;
-    this.zoomSpeed = 0.00085;
+    // Speed tuning (visualization only): keep consistent behavior regardless of zoom.
+    // (No distance-aware scaling; the same input always produces the same response.)
+    this.rotateSpeed = 0.00048;
+    // Zoom (dolly) uses a constant world-units step per wheel "notch" (ft).
+    // This avoids the "more zoomed = smaller zoom step" feel in perspective views.
+    this.zoomStepFt = 120;
 
-    this.panSpeed = 0.13;
+    this.panSpeed = 0.10;
+	    // NOTE: We intentionally do not implement any automatic "focus near pole" behavior.
+	    // Pivot snapping / cursor focus caused visible camera jumps in real-world use.
+
 
     // Keyboard translation (6DOF-style navigation).
     // - WASD / Arrow keys: strafe + forward/back (horizontal)
@@ -694,6 +708,10 @@
     let lastX = 0;
     let lastY = 0;
     let movedPx = 0;
+    let hoverX = 0;
+    let hoverY = 0;
+    let zoomFromWheel = false;
+
 
     const spherical = new THREE.Spherical();
     const sphericalDelta = new THREE.Spherical(1, 0, 0); // radius unused
@@ -707,32 +725,90 @@
     const v3tmp = new THREE.Vector3();
     const v3tmp2 = new THREE.Vector3();
 
+
+
     // 6DOF-style keyboard navigation (visualization only).
     const keys = Object.create(null);
     const vKeyMove = new THREE.Vector3();
     const vKeyWorld = new THREE.Vector3();
     const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+    // Cursor-to-world helpers: used for "zoom toward cursor" so the camera does not
+    // become center-map biased and can continue to zoom in near outlying poles.
+    const vNdc = new THREE.Vector3();
+    const vRayDir = new THREE.Vector3();
+    const vCursorHit = new THREE.Vector3();
+    const vPlaneN = new THREE.Vector3();
+
     function isTypingTarget(evt) {
+      // Only treat true text-entry controls as typing targets.
+      // This avoids "WASDQE doesn't work" reports when focus is on a checkbox/radio.
       const el = evt && evt.target;
       if (!el) return false;
       const tag = String(el.tagName || "").toUpperCase();
-      return tag === "INPUT" || tag === "TEXTAREA" || !!el.isContentEditable;
+      if (tag === "TEXTAREA" || !!el.isContentEditable) return true;
+      if (tag === "SELECT") return true;
+      if (tag === "INPUT") {
+        const type = String(el.type || "text").toLowerCase();
+        return type === "text" || type === "search" || type === "email" || type === "number" ||
+          type === "password" || type === "tel" || type === "url";
+      }
+      return false;
+    }
+
+    function is3dActive() {
+      try { return !!(document.body && document.body.classList && document.body.classList.contains("is-3d")); } catch (_) {}
+      return true;
+    }
+
+    function shouldCaptureKey(code) {
+      return code === "KeyW" || code === "KeyA" || code === "KeyS" || code === "KeyD" ||
+        code === "KeyQ" || code === "KeyE" || code === "KeyR" || code === "KeyF" ||
+        code === "ArrowUp" || code === "ArrowDown" || code === "ArrowLeft" || code === "ArrowRight" ||
+        code === "PageUp" || code === "PageDown" ||
+        code === "Equal" || code === "Minus" || code === "NumpadAdd" || code === "NumpadSubtract" ||
+        code === "ShiftLeft" || code === "ShiftRight" || code === "ControlLeft" || code === "ControlRight";
     }
 
     function onKeyDown(evt) {
       if (!scope.enableKeys) return;
+      if (!is3dActive()) return;
       if (isTypingTarget(evt)) return;
-      keys[evt.code] = true;
+
+      const code = String(evt.code || "");
+      if (!code) return;
+
+      keys[code] = true;
+
+      // Keyboard zoom for users without mouse wheels.
+      if (code === "Equal" || code === "NumpadAdd") {
+        zoomDelta -= 120;
+      } else if (code === "Minus" || code === "NumpadSubtract") {
+        zoomDelta += 120;
+      }
+
+      if (shouldCaptureKey(code)) {
+        evt.preventDefault();
+      }
     }
 
     function onKeyUp(evt) {
       if (!scope.enableKeys) return;
-      keys[evt.code] = false;
+      if (!is3dActive()) return;
+      if (isTypingTarget(evt)) return;
+
+      const code = String(evt.code || "");
+      if (!code) return;
+
+      keys[code] = false;
+
+      if (shouldCaptureKey(code)) {
+        evt.preventDefault();
+      }
     }
 
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("keyup", onKeyUp, true);
 
     function updateSphericalFromCamera() {
       const offset = v3tmp.copy(camera.position).sub(scope.target);
@@ -745,8 +821,37 @@
       // Normalize wheel delta to keep zoom feel consistent across devices.
       const dy = Number(deltaY || 0);
       if (!isFinite(dy) || dy === 0) return 0;
-      // Some devices emit very large deltas; clamp to avoid sudden jumps.
-      return Math.max(-1200, Math.min(1200, dy));
+	      // Some devices (especially trackpads) can emit very large deltas in bursts;
+	      // clamp to avoid sudden, disorienting jumps.
+	      return Math.max(-360, Math.min(360, dy));
+    }
+
+    function getCursorHitOnTargetPlane(out) {
+      // Intersect the mouse cursor ray with the plane that passes through
+      // the current orbit target and is perpendicular to the camera view direction.
+      // This keeps zoom behavior stable and prevents "center-map" focal drift.
+      try {
+        const rect = scope.domElement.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+
+        const ndcX = ((hoverX - rect.left) / rect.width) * 2 - 1;
+        const ndcY = -((hoverY - rect.top) / rect.height) * 2 + 1;
+
+        vNdc.set(ndcX, ndcY, 0.5).unproject(camera);
+        vRayDir.copy(vNdc).sub(camera.position).normalize();
+
+        camera.getWorldDirection(vPlaneN);
+        const denom = vRayDir.dot(vPlaneN);
+        if (!Number.isFinite(denom) || Math.abs(denom) < 1e-6) return false;
+
+        const t = vCursorHit.copy(scope.target).sub(camera.position).dot(vPlaneN) / denom;
+        if (!Number.isFinite(t) || t <= 0) return false;
+
+        out.copy(camera.position).addScaledVector(vRayDir, t);
+        return true;
+      } catch (_) {
+        return false;
+      }
     }
 
     function pan(dx, dy) {
@@ -754,38 +859,67 @@
       const w = element.clientWidth || 1;
       const h = element.clientHeight || 1;
 
+	      // Ensure camera matrices are current so pan vectors don't "snap" or jitter
+	      // due to stale transforms during rapid interactions.
+	      try { camera.updateMatrixWorld(true); } catch (_) {}
+
       if (camera.isPerspectiveCamera) {
-        const offset = v3tmp.copy(camera.position).sub(scope.target);
-        let targetDistance = offset.length();
-        // Prevent pan from becoming unusably slow when zoomed in very close.
-        // The 3D world units used throughout this view are feet.
-        targetDistance = Math.max(200, targetDistance);
-        // Convert to viewport height at the target distance.
-        targetDistance *= Math.tan((camera.fov / 2) * (Math.PI / 180));
+        // Constant world-units-per-pixel pan so navigation feels the same
+        // regardless of zoom level (visualization only).
+        const panX = dx * scope.panSpeed;
+        const panY = dy * scope.panSpeed;
 
-        const panX = (2 * dx * targetDistance) / h * scope.panSpeed;
-        const panY = (2 * dy * targetDistance) / h * scope.panSpeed;
+        // camera matrix columns: 0 = right, 1 = up
+        // Keep mouse panning in the X/Z plane so zoom does not become increasingly
+        // restrictive due to target Y drift during long navigation sessions.
+	        const right = v3tmp.setFromMatrixColumn(camera.matrixWorld, 0);
+        right.y = 0;
+        if (right.lengthSq() < EPS) right.set(1, 0, 0);
+        right.normalize().multiplyScalar(-panX);
 
-        // camera matrix columns: 0 = right, 1 = up, 2 = forward
-        const right = v3tmp.setFromMatrixColumn(camera.matrix, 0).setLength(-panX);
-        const up = v3tmp2.setFromMatrixColumn(camera.matrix, 1).setLength(panY);
+	        const up = v3tmp2.setFromMatrixColumn(camera.matrixWorld, 1);
+        up.y = 0;
+        // When the camera is perfectly level, "up" projects to ~0 in X/Z.
+        // Fall back to forward projected onto the ground plane.
+        if (up.lengthSq() < EPS) {
+          try { camera.getWorldDirection(up); } catch (_) { up.set(0, 0, 1); }
+          up.y = 0;
+        }
+        if (up.lengthSq() < EPS) up.set(0, 0, 1);
+        up.normalize().multiplyScalar(panY);
+
         panOffset.add(right).add(up);
       } else if (camera.isOrthographicCamera) {
         const panX = (dx * (camera.right - camera.left)) / w * scope.panSpeed;
         const panY = (dy * (camera.top - camera.bottom)) / h * scope.panSpeed;
-        const right = v3tmp.setFromMatrixColumn(camera.matrix, 0).setLength(-panX);
-        const up = v3tmp2.setFromMatrixColumn(camera.matrix, 1).setLength(panY);
+	        const right = v3tmp.setFromMatrixColumn(camera.matrixWorld, 0);
+        right.y = 0;
+        if (right.lengthSq() < EPS) right.set(1, 0, 0);
+        right.normalize().multiplyScalar(-panX);
+
+	        const up = v3tmp2.setFromMatrixColumn(camera.matrixWorld, 1);
+        up.y = 0;
+        if (up.lengthSq() < EPS) {
+          try { camera.getWorldDirection(up); } catch (_) { up.set(0, 0, 1); }
+          up.y = 0;
+        }
+        if (up.lengthSq() < EPS) up.set(0, 0, 1);
+        up.normalize().multiplyScalar(panY);
+
         panOffset.add(right).add(up);
       }
     }
 
-    function onPointerDown(e) {
+
+function onPointerDown(e) {
       if (activePointerId != null) return;
       activePointerId = e.pointerId;
       try { scope.domElement.setPointerCapture(activePointerId); } catch (_) {}
 
       lastX = e.clientX;
       lastY = e.clientY;
+      hoverX = e.clientX;
+      hoverY = e.clientY;
 
       movedPx = 0;
       scope.suppressClick = false;
@@ -799,6 +933,8 @@
     }
 
     function onPointerMove(e) {
+      hoverX = e.clientX;
+      hoverY = e.clientY;
       if (activePointerId == null || e.pointerId !== activePointerId) return;
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
@@ -808,8 +944,10 @@
       movedPx += Math.abs(dx) + Math.abs(dy);
 
       if (state === STATE.ROTATE) {
-        sphericalDelta.theta -= dx * scope.rotateSpeed;
-        sphericalDelta.phi -= dy * scope.rotateSpeed;
+        // Keep rotate behavior consistent regardless of zoom level.
+        const sp = scope.rotateSpeed;
+        sphericalDelta.theta -= dx * sp;
+        sphericalDelta.phi -= dy * sp;
       } else if (state === STATE.PAN) {
         pan(dx, dy);
       }
@@ -822,10 +960,15 @@
       if (movedPx > 3) scope.suppressClick = true;
       activePointerId = null;
       state = STATE.NONE;
+
       e.preventDefault();
     }
 
     function onWheel(e) {
+      // Track cursor position so zoom can bias toward the user's current focus.
+      hoverX = e.clientX;
+      hoverY = e.clientY;
+      zoomFromWheel = true;
       zoomDelta += getZoomScaleFromWheel(e.deltaY);
       e.preventDefault();
     }
@@ -856,25 +999,24 @@
       spherical.phi = Math.max(EPS, Math.min(maxPhi, spherical.phi));
 
       if (zoomDelta !== 0) {
-        const r = Math.max(1e-6, spherical.radius);
-        // Increase zoom step as distance grows so the view stays responsive
-        // across both small and very large job extents.
-        const rMin = 50;
-        const rMax = Math.max(rMin * 2, Number(scope.maxDistance || 250000));
-        const logMin = Math.log10(rMin);
-        const logMax = Math.log10(rMax);
-        const tt = (Math.log10(r) - logMin) / (logMax - logMin);
-        const k = Math.max(0, Math.min(1, tt));
-
-        const baseFrac = Math.min(0.25, Math.max(0.02, 100 * Number(scope.zoomSpeed || 0.00085)));
-        const frac = baseFrac * (1 + 2 * k); // near: baseFrac, far: ~3x
-        const baseStep = r * frac;
-
-        const minStep = (zoomDelta > 0) ? 15 : 6;
-        const maxStep = 80000;
-        const stepPerNotch = Math.min(maxStep, Math.max(minStep, baseStep));
-        const notches = zoomDelta / 100;
-        spherical.radius += notches * stepPerNotch;
+        // "Infinite" dolly zoom: constant world-units step per notch so zooming
+        // feels the same no matter how close/far you already are (visualization only).
+        const notches = zoomDelta / 120;
+        const stepFt = Math.max(0.1, Number(scope.zoomStepFt != null ? scope.zoomStepFt : 120));
+        const boost = (keys.ShiftLeft || keys.ShiftRight) ? 4 : 1;
+        const slow = (keys.ControlLeft || keys.ControlRight) ? 0.25 : 1;
+        const deltaR = notches * stepFt * boost * slow;
+        if (Number.isFinite(deltaR) && deltaR !== 0) {
+          // Keep zoom behavior usable at the outskirts of the map by gently
+          // sliding the orbit target toward the cursor position (at the current
+          // target depth) while zooming in.
+          if (deltaR < 0 && zoomFromWheel && getCursorHitOnTargetPlane(vCursorHit)) {
+            const rel = Math.min(1, Math.abs(deltaR) / Math.max(1, spherical.radius));
+            const alpha = Math.min(0.55, Math.max(0.12, rel * 1.6));
+            scope.target.add(v3tmp2.copy(vCursorHit).sub(scope.target).multiplyScalar(alpha));
+          }
+          spherical.radius += deltaR;
+        }
       }
       spherical.radius = Math.max(scope.minDistance, Math.min(scope.maxDistance, spherical.radius));
 
@@ -928,14 +1070,7 @@
       }
 
 
-      // Prevent navigating under the basemap/ground plane (y≈0).
-      // Keeps the 3D experience stable and avoids inverted/underside views.
-      const MIN_GROUND_Y = 0.04;
-      if (scope.target.y < MIN_GROUND_Y) {
-        const dy = MIN_GROUND_Y - scope.target.y;
-        scope.target.y += dy;
-        camera.position.y += dy;
-      }
+      // Allow navigation above/below the basemap plane (per user request).
 
       if (scope.enableDamping) {
         sphericalDelta.theta *= (1 - scope.dampingFactor);
@@ -948,9 +1083,12 @@
       }
 
       zoomDelta = 0;
+      zoomFromWheel = false;
     };
 
     this.dispose = function dispose() {
+      try { document.removeEventListener("keydown", onKeyDown, true); } catch (_) {}
+      try { document.removeEventListener("keyup", onKeyUp, true); } catch (_) {}
       try { domElement.removeEventListener("pointerdown", onPointerDown); } catch (_) {}
       try { domElement.removeEventListener("pointermove", onPointerMove); } catch (_) {}
       try { domElement.removeEventListener("pointerup", onPointerUp); } catch (_) {}
@@ -1185,6 +1323,13 @@
       if (threeDirty) rebuildThreeScene();
       startThreeLoop();
       refreshThreeVisibility();
+
+      // Ensure keyboard navigation is immediately available in 3D.
+      try {
+        if (threeState && threeState.renderer && threeState.renderer.domElement && typeof threeState.renderer.domElement.focus === "function") {
+          threeState.renderer.domElement.focus();
+        }
+      } catch (_) {}
     } else {
       if (threeEl) threeEl.classList.add("is-hidden");
       if (mapEl) mapEl.classList.remove("is-hidden");
@@ -1226,6 +1371,15 @@
 
       container.appendChild(renderer.domElement);
 
+      // Make the 3D canvas focusable so WASD/QE controls work reliably.
+      try {
+        renderer.domElement.tabIndex = 0;
+        renderer.domElement.style.outline = "none";
+        renderer.domElement.addEventListener("pointerdown", () => {
+          try { renderer.domElement.focus(); } catch (_) {}
+        }, { passive: true });
+      } catch (_) {}
+
       // 3D label overlay (SCIDs). Rendered as HTML so it stays crisp.
       const labelLayer = document.createElement("div");
       labelLayer.className = "three-label-layer";
@@ -1249,9 +1403,9 @@
       controls.enableDamping = true;
       controls.dampingFactor = 0.06;
       controls.screenSpacePanning = true;
-      controls.minDistance = 10;
+      controls.minDistance = 0.001;
       controls.maxDistance = 250000;
-      controls.maxPolarAngle = Math.PI * 0.495;
+      controls.maxPolarAngle = Math.PI;
 
       const ambient = new THREE.AmbientLight(0xffffff, 0.72);
       const dir = new THREE.DirectionalLight(0xffffff, 0.85);
@@ -1289,7 +1443,9 @@
         groups: {
           ground: null,
           spans: null,
+          guying: null,
           poles: null,
+          equipment: null,
           midspans: null,
           issues: null,
         },
@@ -1297,6 +1453,15 @@
         midGroupsById: new Map(),
         scidLabels3d: new Map(),
         pickables: [],
+
+        // Node anchors (poles + midspans): used to keep the camera pivot pole-oriented.
+        nodeAnchors: [],
+        // Pole-only anchors for the "double click to focus pole" feature.
+        poleAnchors: [],
+        pivotSnapFt: 250,
+
+        // Visualization-only: materials that receive a subtle pulse (installing company highlight).
+        installPulseMaterials: [],
       };
 
       // Picking for Details panel
@@ -1364,8 +1529,13 @@
       threeState.root.clear();
     }
     threeState.pickables = [];
+    threeState.nodeAnchors = [];
+    threeState.poleAnchors = [];
     threeState.poleGroupsById = new Map();
     threeState.midGroupsById = new Map();
+    threeState.installPulseMaterials = [];
+    threeState.wirePickIndex = new Map();
+    threeState.guyPickIndex = new Map();
 
     // Reset 3D SCID label overlay (visualization only).
     try { if (threeState.labelLayer) threeState.labelLayer.innerHTML = ""; } catch (_) {}
@@ -1377,11 +1547,15 @@
 
     threeState.groups.ground = new THREE.Group();
     threeState.groups.spans = new THREE.Group();
+    threeState.groups.guying = new THREE.Group();
     threeState.groups.poles = new THREE.Group();
+    // Equipment meshes are stored inside each pole group so they respect status filtering.
+    threeState.groups.equipment = null;
     threeState.groups.midspans = new THREE.Group();
     threeState.groups.issues = new THREE.Group();
     threeState.root.add(threeState.groups.ground);
     threeState.root.add(threeState.groups.spans);
+    threeState.root.add(threeState.groups.guying);
     threeState.root.add(threeState.groups.poles);
     threeState.root.add(threeState.groups.midspans);
     threeState.root.add(threeState.groups.issues);
@@ -1440,6 +1614,47 @@
       if (st === "fail") return 0xef4444;
       return 0x94a3b8;
     };
+
+    // Installing Company highlight (3D only): green dull flashing overlay on the wire + a bead on the pole.
+    // NOTE: the rule selection lives under rules.midspan.installingCompany.
+    const installingCompanyKey = (rules && rules.midspan && rules.midspan.installingCompany)
+      ? normalizeOwnerKey(rules.midspan.installingCompany)
+      : "";
+
+    const INSTALL_PULSE_COLOR = 0x22c55e;
+    const installPulseWireMat = installingCompanyKey ? new THREE.MeshStandardMaterial({
+      color: INSTALL_PULSE_COLOR,
+      emissive: INSTALL_PULSE_COLOR,
+      emissiveIntensity: 0.10,
+      roughness: 0.42,
+      metalness: 0.02,
+      transparent: true,
+      opacity: 0.34,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }) : null;
+
+    const installPulseBeadMat = installingCompanyKey ? new THREE.MeshStandardMaterial({
+      color: INSTALL_PULSE_COLOR,
+      emissive: INSTALL_PULSE_COLOR,
+      emissiveIntensity: 0.16,
+      roughness: 0.36,
+      metalness: 0.02,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }) : null;
+
+    if (installPulseWireMat) {
+      installPulseWireMat.userData.pulse = { baseOpacity: 0.22, ampOpacity: 0.18, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.12 };
+      threeState.installPulseMaterials.push(installPulseWireMat);
+    }
+    if (installPulseBeadMat) {
+      installPulseBeadMat.userData.pulse = { baseOpacity: 0.34, ampOpacity: 0.20, baseEmissiveIntensity: 0.10, ampEmissiveIntensity: 0.16 };
+      threeState.installPulseMaterials.push(installPulseBeadMat);
+    }
+
 
 
     // 3D ground basemap (streets / light / imagery) using slippy-map tiles.
@@ -1733,6 +1948,56 @@
       return { failAttachmentIds, failMeasureIds, warnAttachmentIds, warnMeasureIds, orderAttachmentIds, orderMeasureIds };
     })();
 
+    // --- 3D helpers (visualization only) ---
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    // Deterministic hash for stable "default" equipment bearings when a job does not
+    // provide explicit direction data.
+    const hashU32 = (s) => {
+      const str = String(s || "");
+      let h = 2166136261;
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return (h >>> 0);
+    };
+
+    const parseBearingDeg = (text) => {
+      const t = String(text || "");
+      // Common patterns: "bearing 123", "@123°", "123 deg".
+      const m = t.match(/(?:bearing\s*[:=]?\s*|@\s*)(\d{1,3}(?:\.\d+)?)/i) || t.match(/(\d{1,3}(?:\.\d+)?)\s*(?:deg|°)/i);
+      if (!m) return null;
+      const v = Number(m[1]);
+      if (!Number.isFinite(v)) return null;
+      return ((v % 360) + 360) % 360;
+    };
+
+    const bearingVecXZ = (bearingDeg) => {
+      const rad = toRad(bearingDeg);
+      // Bearing: 0=north (+z), 90=east (-x due to MIRROR_X), 180=south (-z), 270=west (+x)
+      return new THREE.Vector3(-Math.sin(rad), 0, Math.cos(rad));
+    };
+
+    const parseFirstFeet = (text) => {
+      const t = String(text || "");
+      const m = t.match(/(\d+(?:\.\d+)?)\s*(?:ft|')/i);
+      const v = m ? Number(m[1]) : NaN;
+      return Number.isFinite(v) ? v : null;
+    };
+
+    const cylinderBetween = (p1, p2, radius, material) => {
+      const dir = new THREE.Vector3().subVectors(p2, p1);
+      const len = dir.length();
+      if (!Number.isFinite(len) || len <= 0.001) return null;
+      const geom = new THREE.CylinderGeometry(radius, radius, len, 10, 1);
+      const mesh = new THREE.Mesh(geom, material);
+      const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+      mesh.position.copy(mid);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+      return mesh;
+    };
+
     // Span lines (ground reference)
     {
       const matPolePole = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.32 });
@@ -1754,10 +2019,169 @@
       }
     }
 
+    // Guying (existing + proposed) / messengers (3D)
+    // Rendered as gray linework (requested). Down guys are drawn from the pole to
+    // the ground anchor. Pole-to-pole guying is drawn between poles.
+    {
+      const guys = Array.isArray(model.guyLines) ? model.guyLines : [];
+      if (guys.length && threeState.groups.guying) {
+        const guyMatExisting = new THREE.MeshStandardMaterial({
+          color: 0x9ca3af,
+          emissive: 0x9ca3af,
+          emissiveIntensity: 0.05,
+          roughness: 0.60,
+          metalness: 0.02,
+          transparent: true,
+          opacity: 0.46,
+          depthWrite: false,
+        });
+
+        // Proposed guying/downguying: solid flashing gray (requested).
+        const guyMatProposed = new THREE.MeshStandardMaterial({
+          color: 0x9ca3af,
+          emissive: 0x9ca3af,
+          emissiveIntensity: 0.10,
+          roughness: 0.52,
+          metalness: 0.02,
+          transparent: true,
+          opacity: 0.72,
+          depthWrite: false,
+        });
+
+        // Flash all proposed linework (3D only).
+        guyMatProposed.userData.pulse = { baseOpacity: 0.42, ampOpacity: 0.34, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.10 };
+        threeState.installPulseMaterials.push(guyMatProposed);
+
+        for (const g0 of guys) {
+          if (!g0) continue;
+          const poleId = (g0.poleId != null) ? String(g0.poleId) : "";
+          if (!poleId) continue;
+          const pole = poleById.get(poleId);
+          if (!pole || pole.lat == null || pole.lon == null) continue;
+
+          const poleXZ = latLonToXZFt(Number(pole.lat), Number(pole.lon));
+          const anchorId = (g0.anchorId != null) ? String(g0.anchorId) : "";
+          const anchorType = String(g0.anchorType || "").toLowerCase();
+          const isPoleToPole = anchorType === "pole";
+
+          let anchorXZ = null;
+          if (g0.anchorLat != null && g0.anchorLon != null) {
+            anchorXZ = latLonToXZFt(Number(g0.anchorLat), Number(g0.anchorLon));
+          } else if (anchorId && poleById.has(anchorId)) {
+            const ap = poleById.get(anchorId);
+            if (ap && ap.lat != null && ap.lon != null) anchorXZ = latLonToXZFt(Number(ap.lat), Number(ap.lon));
+          }
+
+          if (!anchorXZ) {
+            // Fallback: deterministic offset so the downguys are still visible.
+            const b = hashU32(`${poleId}|${anchorId}|${g0.traceId || ""}`) % 360;
+            const dir = bearingVecXZ(b);
+            const dFt = 28;
+            anchorXZ = { x: poleXZ.x + dir.x * dFt, z: poleXZ.z + dir.z * dFt };
+          }
+
+          const exIn = (g0.existingIn != null && Number.isFinite(Number(g0.existingIn))) ? Number(g0.existingIn) : null;
+          const prIn = (g0.proposedIn != null && Number.isFinite(Number(g0.proposedIn))) ? Number(g0.proposedIn) : null;
+
+          // Proposed detection for guying/downguys:
+          // - Katapult may mark proposed facilities at the trace level (trace.proposed).
+          // - Some datasets also include an explicit guying_type label containing "proposed".
+          // We treat either as proposed so new/proposed downguying reliably flashes in 3D.
+          const guyingTypeLower = String(g0.guyingType || "").toLowerCase();
+          const isProposedTagged = !!(g0 && g0.traceProposed) || guyingTypeLower.includes("proposed");
+
+          const hasExisting = (exIn != null) && !isProposedTagged;
+          const hasProposed = (prIn != null) && (isProposedTagged || !hasExisting || (exIn != null && Math.abs(prIn - exIn) >= 1));
+          if (!hasExisting && !hasProposed) continue;
+
+          const yExisting = hasExisting ? (exIn / 12) : null;
+          const yProposed = hasProposed ? (prIn / 12) : null;
+
+          const groundY = 0.15;
+          const endYExisting = isPoleToPole ? (yExisting != null ? yExisting : groundY) : groundY;
+          const endYProposed = isPoleToPole ? (yProposed != null ? yProposed : groundY) : groundY;
+
+          const entType = isPoleToPole ? "guy" : "downguy";
+          const traceId = (g0.traceId != null) ? String(g0.traceId) : "";
+          const exKey = (exIn != null) ? String(Math.round(exIn)) : "na";
+          const prKey = (prIn != null) ? String(Math.round(prIn)) : "na";
+          const baseKey = `${poleId}|${anchorType}|${anchorId}|${traceId}|${exKey}|${prKey}`;
+
+          if (yExisting != null) {
+            const p1 = new THREE.Vector3(poleXZ.x, yExisting, poleXZ.z);
+            const p2 = new THREE.Vector3(anchorXZ.x, endYExisting, anchorXZ.z);
+            const seg = cylinderBetween(p1, p2, 0.26, guyMatExisting);
+            if (seg) {
+              const segId = `${baseKey}|existing`;
+              seg.userData = { entityType: entType, entityId: segId };
+              threeState.guyPickIndex.set(segId, {
+                type: entType,
+                variant: "existing",
+                poleId,
+                anchorType,
+                anchorId,
+                traceId,
+                existingIn: exIn,
+                proposedIn: prIn,
+                isPoleToPole,
+              });
+              threeState.groups.guying.add(seg);
+              threeState.pickables.push(seg);
+            }
+          }
+          if (yProposed != null) {
+            const p1 = new THREE.Vector3(poleXZ.x, yProposed, poleXZ.z);
+            const p2 = new THREE.Vector3(anchorXZ.x, endYProposed, anchorXZ.z);
+            const seg = cylinderBetween(p1, p2, 0.30, guyMatProposed);
+            if (seg) {
+              const segId = `${baseKey}|proposed`;
+              seg.userData = { entityType: entType, entityId: segId };
+              threeState.guyPickIndex.set(segId, {
+                type: entType,
+                variant: "proposed",
+                poleId,
+                anchorType,
+                anchorId,
+                traceId,
+                existingIn: exIn,
+                proposedIn: prIn,
+                isPoleToPole,
+              });
+              threeState.groups.guying.add(seg);
+              threeState.pickables.push(seg);
+            }
+          }
+        }
+      }
+    }
+
     // Poles
     {
       const poleRadiusBottom = 0.55;
       const poleRadiusTop = 0.38;
+
+      // Equipment (3D): transformer cans + streetlights.
+      // Purple @ ~50% opacity (requested).
+      const equipmentColor = 0x8b5cf6;
+      const equipmentMat = new THREE.MeshStandardMaterial({
+        color: equipmentColor,
+        emissive: equipmentColor,
+        emissiveIntensity: 0.16,
+        roughness: 0.32,
+        metalness: 0.08,
+        transparent: true,
+        opacity: 0.50,
+      });
+      equipmentMat.depthWrite = false;
+
+      const equipmentPanelMat = new THREE.MeshBasicMaterial({
+        color: equipmentColor,
+        transparent: true,
+        opacity: 0.18,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
 
       const parsePoleHeightFt = (p) => {
         const raw = String(p.proposedPoleSpec || p.poleSpec || p.poleHeightClass || "").trim();
@@ -1786,13 +2210,26 @@
         }
         const poleId = String(p.poleId);
 
+        // Anchor for camera pivot snapping (poles + midspans).
+        // NOTE: midspans should *not* be added to poleAnchors; poleAnchors are reserved for
+        // pole-only interactions like double-click "focus nearest pole".
+        if (threeState.nodeAnchors) threeState.nodeAnchors.push({ x: pos.x, z: pos.z });
+
         const res = qcResults && qcResults.poles ? qcResults.poles[poleId] : null;
         const st = res && res.status ? res.status : "unknown";
         const hasOrder = !!(res && res.hasCommOrderIssue);
 
         const hFt = parsePoleHeightFt(p);
         const geom = new THREE.CylinderGeometry(poleRadiusTop, poleRadiusBottom, hFt, 8, 1);
-        const mat = new THREE.MeshStandardMaterial({ color: statusColor(st), roughness: 0.65, metalness: 0.06 });
+        const cSt = statusColor(st);
+        const emiss = (st === "fail") ? 0.32 : (st === "warn") ? 0.24 : (st === "pass") ? 0.12 : 0.10;
+        const mat = new THREE.MeshStandardMaterial({
+          color: cSt,
+          emissive: cSt,
+          emissiveIntensity: emiss,
+          roughness: 0.63,
+          metalness: 0.06,
+        });
         const mesh = new THREE.Mesh(geom, mat);
         mesh.position.set(pos.x, hFt / 2, pos.z);
         mesh.userData = { entityType: "pole", entityId: poleId };
@@ -1800,18 +2237,196 @@
         const group = new THREE.Group();
         group.add(mesh);
 
-        // Yellow ring around nodes with comm-order issues (keeps parity with 2D halo behavior).
+        // Equipment (3D): transformers + streetlights.
+        // Uses equipment rows already present in pole attachments (extracted from the job JSON).
+        try {
+          const equipAtts = (p.attachments || []).filter(a => a && String(a.category || "").toLowerCase() === "equipment");
+          if (equipAtts.length) {
+            const transformersByTrace = new Map();
+            const streetLightsByTrace = new Map();
+
+            for (const a of equipAtts) {
+              const hIn = (a.proposedIn != null) ? a.proposedIn : a.existingIn;
+              if (hIn == null || !Number.isFinite(Number(hIn))) continue;
+              const hFtEq = Number(hIn) / 12;
+
+              const clsEq = classify(a);
+              if (!clsEq.isTransformer && !clsEq.isStreetLight) continue;
+
+              const traceId = (a.traceId != null) ? String(a.traceId) : (a.id != null ? `equip_${a.id}` : `equip_${Math.random()}`);
+              const pack = {
+                hFt: hFtEq,
+                label: String(a.label || ""),
+                traceLabel: String(a.traceLabel || ""),
+                comments: String(a.comments || ""),
+              };
+
+              const bucket = clsEq.isTransformer ? transformersByTrace : streetLightsByTrace;
+              if (!bucket.has(traceId)) bucket.set(traceId, []);
+              bucket.get(traceId).push(pack);
+            }
+
+            const pickBearingDeg = (seedText, fallbackSeed) => {
+              const b = parseBearingDeg(seedText);
+              if (b != null) return b;
+              return (hashU32(fallbackSeed) % 360);
+            };
+
+            // Transformer cans
+            for (const [traceId, pts] of transformersByTrace.entries()) {
+              const hs = pts.map(p => p.hFt).filter(h => Number.isFinite(h));
+              if (!hs.length) continue;
+              let topFt = Math.max(...hs);
+              let bottomFt = Math.min(...hs);
+              if (!Number.isFinite(topFt) || !Number.isFinite(bottomFt)) continue;
+
+              // If only one point is provided, assume a reasonable can height.
+              if ((topFt - bottomFt) < 1.25) bottomFt = topFt - 4.0;
+              bottomFt = Math.max(2.0, bottomFt);
+              const canH = Math.max(2.5, topFt - bottomFt);
+              const canR = 1.25;
+
+              const seedText = pts.map(p => p.label || p.traceLabel || p.comments).join(" ");
+              const bDeg = pickBearingDeg(seedText, `${poleId}|${traceId}|transformer`);
+              const dir = bearingVecXZ(bDeg).normalize();
+              const offset = poleRadiusBottom + canR + 0.25;
+
+              const canCenter = new THREE.Vector3(
+                pos.x + dir.x * offset,
+                (topFt + bottomFt) / 2,
+                pos.z + dir.z * offset
+              );
+              const canG = new THREE.CylinderGeometry(canR, canR, canH, 16, 1);
+              const can = new THREE.Mesh(canG, equipmentMat);
+              can.position.copy(canCenter);
+              group.add(can);
+
+              // Top + bottom brackets
+              for (const y of [topFt, bottomFt]) {
+                const polePt = new THREE.Vector3(pos.x, y, pos.z).addScaledVector(dir, poleRadiusBottom * 0.95);
+                const canPt = new THREE.Vector3(canCenter.x, y, canCenter.z).addScaledVector(dir, -canR * 0.95);
+                const br = cylinderBetween(polePt, canPt, 0.11, equipmentMat);
+                if (br) group.add(br);
+              }
+
+              // Direction tick (keeps bearing readable without the large exterior disk).
+              const tickStart = canCenter.clone().addScaledVector(dir, canR * 0.98);
+              const tickEnd = tickStart.clone().addScaledVector(dir, 1.15);
+              const tick = cylinderBetween(tickStart, tickEnd, 0.07, equipmentMat);
+              if (tick) group.add(tick);
+
+              const tipG = new THREE.SphereGeometry(0.18, 12, 10);
+              const tip = new THREE.Mesh(tipG, equipmentMat);
+              tip.position.copy(tickEnd);
+              group.add(tip);
+            }
+
+            // Streetlights
+            for (const [traceId, pts] of streetLightsByTrace.entries()) {
+              const hs = pts.map(p => p.hFt).filter(h => Number.isFinite(h));
+              if (!hs.length) continue;
+              let topFt = Math.max(...hs);
+              let bottomFt = Math.min(...hs);
+              if (!Number.isFinite(topFt) || !Number.isFinite(bottomFt)) continue;
+              if ((topFt - bottomFt) < 0.60) bottomFt = topFt - 1.0;
+              bottomFt = Math.max(1.5, bottomFt);
+
+              const seedText = pts.map(p => p.label || p.traceLabel || p.comments).join(" ");
+              const bDeg = pickBearingDeg(seedText, `${poleId}|${traceId}|streetlight`);
+              const dir = bearingVecXZ(bDeg).normalize();
+
+              // Bracket/arm length (feet). We parse the first "X ft" value from the label.
+              let armFt = parseFirstFeet(seedText);
+              if (!Number.isFinite(armFt)) armFt = 5;
+              armFt = clamp(armFt, 2.5, 25);
+
+              const armEndXZ = new THREE.Vector3(pos.x, 0, pos.z).addScaledVector(dir, poleRadiusBottom + armFt);
+
+              const poleTop = new THREE.Vector3(pos.x, topFt, pos.z).addScaledVector(dir, poleRadiusBottom * 0.95);
+              const poleBot = new THREE.Vector3(pos.x, bottomFt, pos.z).addScaledVector(dir, poleRadiusBottom * 0.95);
+              const endTop = new THREE.Vector3(armEndXZ.x, topFt, armEndXZ.z);
+              const endBot = new THREE.Vector3(armEndXZ.x, bottomFt, armEndXZ.z);
+
+              const topArm = cylinderBetween(poleTop, endTop, 0.12, equipmentMat);
+              const botArm = cylinderBetween(poleBot, endBot, 0.12, equipmentMat);
+              const tie = cylinderBetween(endBot, endTop, 0.10, equipmentMat);
+              if (topArm) group.add(topArm);
+              if (botArm) group.add(botArm);
+              if (tie) group.add(tie);
+
+              // Lamp head (simple + readable)
+              const headG = new THREE.ConeGeometry(0.55, 1.15, 18);
+              const head = new THREE.Mesh(headG, equipmentMat);
+              head.position.set(armEndXZ.x, bottomFt - 0.15, armEndXZ.z);
+              head.rotation.x = Math.PI;
+              group.add(head);
+
+              const lensG = new THREE.CircleGeometry(0.70, 18);
+              const lens = new THREE.Mesh(lensG, equipmentPanelMat);
+              lens.position.set(armEndXZ.x, bottomFt - 0.58, armEndXZ.z);
+              lens.rotation.x = Math.PI / 2;
+              group.add(lens);
+            }
+          }
+        } catch (_) {}
+
+        // Status beacon (3D): makes FAIL/WARN poles visually unmistakable.
+        // Futuristic, high-contrast indicators that stay readable at wide extents.
+        if (st === "fail" || st === "warn") {
+          const beaconOpacity = (st === "fail") ? 0.42 : 0.34;
+          const beamOpacity = (st === "fail") ? 0.12 : 0.10;
+
+          // Wider + thicker ground halo for clearer PASS/FAIL/WARN identification in 3D.
+          const haloG = new THREE.TorusGeometry(5.25, 0.36, 12, 64);
+          const haloM = new THREE.MeshBasicMaterial({
+            color: cSt,
+            transparent: true,
+            opacity: beaconOpacity,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          });
+          const halo = new THREE.Mesh(haloG, haloM);
+          halo.rotation.x = Math.PI / 2;
+          halo.position.set(pos.x, 0.85, pos.z);
+          group.add(halo);
+
+          const beamH = Math.min(120, hFt + 28);
+          // Slightly wider "holographic" beacon column for better readability at a glance.
+          const beamG = new THREE.CylinderGeometry(2.10, 2.10, beamH, 16, 1, true);
+          const beamM = new THREE.MeshBasicMaterial({
+            color: cSt,
+            transparent: true,
+            opacity: beamOpacity,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const beam = new THREE.Mesh(beamG, beamM);
+          beam.position.set(pos.x, beamH / 2, pos.z);
+          group.add(beam);
+        }
+
+	        // Yellow ring around nodes with comm-order issues (keeps parity with 2D halo behavior).
+        // Per user request: circle only (no yellow hologram/beam).
         if (hasOrder) {
-          const ringG = new THREE.TorusGeometry(2.2, 0.18, 10, 42);
-          const ringM = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.75 });
+          // Thick, high-contrast ring around comm arrangement issues.
+          const ringG = new THREE.TorusGeometry(4.25, 0.48, 14, 64);
+          const ringM = new THREE.MeshBasicMaterial({
+            color: 0xfacc15,
+            transparent: true,
+            opacity: 0.82,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          });
           const ring = new THREE.Mesh(ringG, ringM);
           ring.rotation.x = Math.PI / 2;
-          ring.position.set(pos.x, 1.1, pos.z);
+          ring.position.set(pos.x, 1.35, pos.z);
           group.add(ring);
         }
 
 
-        // Highlight attachments implicated by FAIL/WARN and/or ORDER issues.
+        // Highlight attachments implicated by FAIL/WARN only.
+        // (Comm arrangement issues are rendered via the yellow node ring, not beads.)
         for (const a of (p.attachments || [])) {
           if (!a || a.id == null) continue;
           const id = String(a.id);
@@ -1820,19 +2435,17 @@
 
           const isFail = issueSets.failAttachmentIds.has(id);
           const isWarn = issueSets.warnAttachmentIds.has(id);
-          const isOrder = issueSets.orderAttachmentIds.has(id);
-          if (!isFail && !isWarn && !isOrder) continue;
+          if (!isFail && !isWarn) continue;
 
           const cls = classify(a);
           const isPower = typeof cls.kind === "string" && (cls.kind.startsWith("power_") || cls.kind === "power_other");
-          // ORDER-only is rendered as WARN-tone so it is never shown as "passing".
           const sev = isFail ? "fail" : "warn";
           const color = (sev === "fail")
             ? (isPower ? 0xb91c1c : 0xf87171)
             : (isPower ? 0xd97706 : 0xfbbf24);
 
           const y = Number(hIn) / 12;
-          const sphG = new THREE.SphereGeometry(0.62, 14, 10);
+          const sphG = new THREE.SphereGeometry(0.78, 14, 10);
           const sphM = new THREE.MeshStandardMaterial({
             color,
             emissive: color,
@@ -1843,12 +2456,29 @@
           sph.position.set(pos.x, y, pos.z);
           group.add(sph);
 
-          if (isOrder) {
-            const haloG = new THREE.SphereGeometry(0.92, 14, 10);
-            const haloM = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.20, blending: THREE.AdditiveBlending, depthWrite: false });
-            const halo = new THREE.Mesh(haloG, haloM);
-            halo.position.copy(sph.position);
-            group.add(halo);
+        }
+
+        // Installing Company marker bead (3D only): green dull flash.
+        if (installPulseBeadMat && installingCompanyKey) {
+          const seenY = new Set();
+          for (const a of (p.attachments || [])) {
+            if (!a) continue;
+            if (String(a.category || "").toLowerCase() !== "wire") continue;
+            const hIn = (a.proposedIn != null ? a.proposedIn : a.existingIn);
+            if (hIn == null) continue;
+            const id = (a.id != null) ? String(a.id) : "";
+            if (id && (issueSets.failAttachmentIds.has(id) || issueSets.warnAttachmentIds.has(id))) continue;
+            const cls = classify(a);
+            if (normalizeOwnerKey(cls.owner) !== installingCompanyKey) continue;
+            const y = Number(hIn) / 12;
+            const yKey = String(Math.round(y * 4) / 4);
+            if (seenY.has(yKey)) continue;
+            seenY.add(yKey);
+
+            const bG = new THREE.SphereGeometry(0.72, 14, 10);
+            const bead = new THREE.Mesh(bG, installPulseBeadMat);
+            bead.position.set(pos.x, y, pos.z);
+            group.add(bead);
           }
         }
 
@@ -1863,8 +2493,14 @@
           const scid = (p.scid != null) ? String(p.scid).trim() : "";
           if (scid && threeState.labelLayer) {
             const lbl = document.createElement("div");
-            lbl.className = "three-scid-label";
+            const cls = ["three-scid-label"];
+            if (st === "fail") cls.push("three-scid-label--fail");
+            else if (st === "warn") cls.push("three-scid-label--warn");
+            else if (st === "pass") cls.push("three-scid-label--pass");
+            if (hasOrder) cls.push("three-scid-label--order");
+            lbl.className = cls.join(" ");
             lbl.textContent = scid;
+            lbl.title = `${scid} • ${st.toUpperCase()}${hasOrder ? " • COMM ORDER" : ""}`;
             threeState.labelLayer.appendChild(lbl);
             const worldPos = new THREE.Vector3(pos.x, hFt + 2.6, pos.z);
             threeState.scidLabels3d.set(poleId, { el: lbl, poleGroup: group, worldPos });
@@ -1879,10 +2515,10 @@
         return typeof k === "string" && (k.startsWith("power_") || k === "power_other");
       };
 
-      // Wire colors: passing wires green, failing wires red, warnings orange.
-      // Power is shown with a stronger shade than comms.
+      // Wire colors: warnings orange, failures red.
+      // Power (pass) is rendered in futuristic purple (unless in violation).
       const wirePalette = {
-        pass: { power: 0x16a34a, comm: 0x4ade80, other: 0x4ade80 },
+        pass: { power: 0x8b5cf6, comm: 0x4ade80, other: 0x4ade80 },
         warn: { power: 0xd97706, comm: 0xfbbf24, other: 0xfbbf24 },
         fail: { power: 0xb91c1c, comm: 0xf87171, other: 0xf87171 },
         unknown: { power: 0x64748b, comm: 0x94a3b8, other: 0x94a3b8 },
@@ -1894,34 +2530,42 @@
         return wirePalette[s][k] || wirePalette.unknown.other;
       };
 
-      const makeWire = (pts, color, radius, withOrderHalo, sev) => {
+      const makeWire = (pts, color, radius, withOrderHalo, sev, pulseMat, proposedPulse) => {
         const curve = new THREE.CatmullRomCurve3(pts);
         const geom = new THREE.TubeGeometry(curve, 10, radius, 6, false);
+
         const emiss = (sev === "fail") ? 0.34 : (sev === "warn") ? 0.26 : 0.16;
-        const mat = new THREE.MeshStandardMaterial({
+        const baseMat = new THREE.MeshStandardMaterial({
           color,
           emissive: color,
           emissiveIntensity: emiss,
           roughness: 0.36,
           metalness: 0.03,
         });
-        const inner = new THREE.Mesh(geom, mat);
+        // Proposed items (3D): flash the wire's native color (requested).
+        if (proposedPulse) {
+          const baseEI = emiss * 0.55;
+          const ampEI = emiss * 0.85;
+          baseMat.emissiveIntensity = baseEI;
+          baseMat.userData.pulse = { baseEmissiveIntensity: baseEI, ampEmissiveIntensity: ampEI };
+          threeState.installPulseMaterials.push(baseMat);
+        }
+
+        const inner = new THREE.Mesh(geom, baseMat);
 
         const g = new THREE.Group();
         g.add(inner);
 
-        if (withOrderHalo) {
-          const outerG = new THREE.TubeGeometry(curve, 10, radius + 0.20, 7, false);
-          const outerM = new THREE.MeshBasicMaterial({
-            color: 0xfacc15,
-            transparent: true,
-            opacity: 0.16,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-          });
-          const outer = new THREE.Mesh(outerG, outerM);
+        // Installing-company highlighting: keep the wire's native color, add a pulsing green overlay.
+        if (pulseMat) {
+          const outerGeom = new THREE.TubeGeometry(curve, 10, radius + 0.12, 8, false);
+          const outer = new THREE.Mesh(outerGeom, pulseMat);
+          outer.renderOrder = 6;
           g.add(outer);
         }
+
+        // Comm arrangement issues are shown by the yellow ring/triangle on the pole/midspan marker.
+        // No additional yellow "hologram" is drawn around the wire itself.
         return g;
       };
 
@@ -1929,6 +2573,9 @@
         if (!ms || typeof ms.lat !== "number" || typeof ms.lon !== "number") continue;
         const msId = String(ms.midspanId);
         const pos = latLonToXZFt(ms.lat, ms.lon);
+
+        // Anchor for camera pivot snapping (poles + midspans).
+        if (threeState.nodeAnchors) threeState.nodeAnchors.push({ x: pos.x, z: pos.z });
 
         // Fallback focus point when there are no poles in the model.
         if (!threeState.firstNode) {
@@ -1950,13 +2597,29 @@
         g.add(cone);
         threeState.pickables.push(cone);
 
-        if (hasOrder) {
-          const ringG = new THREE.TorusGeometry(2.0, 0.17, 10, 42);
-          const ringM = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.70 });
-          const ring = new THREE.Mesh(ringG, ringM);
-          ring.rotation.x = Math.PI / 2;
-          ring.position.set(pos.x, 1.05, pos.z);
-          g.add(ring);
+	        if (hasOrder) {
+	          // Comm arrangement issues (midspan): use a yellow TRIANGLE ring so it
+	          // is immediately distinguishable from pole comm-order circles.
+	          const triR = 4.75;
+	          const triY = 1.05;
+	          const a0 = Math.PI / 2;
+	          const tp1 = new THREE.Vector3(pos.x + triR * Math.cos(a0), triY, pos.z + triR * Math.sin(a0));
+	          const tp2 = new THREE.Vector3(pos.x + triR * Math.cos(a0 + (2 * Math.PI / 3)), triY, pos.z + triR * Math.sin(a0 + (2 * Math.PI / 3)));
+	          const tp3 = new THREE.Vector3(pos.x + triR * Math.cos(a0 + (4 * Math.PI / 3)), triY, pos.z + triR * Math.sin(a0 + (4 * Math.PI / 3)));
+	          const triPath = new THREE.CurvePath();
+	          triPath.add(new THREE.LineCurve3(tp1, tp2));
+	          triPath.add(new THREE.LineCurve3(tp2, tp3));
+	          triPath.add(new THREE.LineCurve3(tp3, tp1));
+	          const ringG = new THREE.TubeGeometry(triPath, 60, 0.48, 10, false);
+	          const ringM = new THREE.MeshBasicMaterial({
+	            color: 0xfacc15,
+	            transparent: true,
+	            opacity: 0.82,
+	            blending: THREE.AdditiveBlending,
+	            depthWrite: false,
+	          });
+	          const ring = new THREE.Mesh(ringG, ringM);
+	          g.add(ring);
         }
 
         const conn = (ms.connectionId != null) ? String(ms.connectionId) : "";
@@ -1967,14 +2630,18 @@
         const bPoleId = (span && span.bIsPole && span.bNodeId != null) ? String(span.bNodeId) : "";
 
         const measures = Array.isArray(ms.measures) ? ms.measures : [];
+        let maxWireFt = 0;
         for (const m0 of measures) {
           if (!m0) continue;
           const mId = (m0.id != null) ? String(m0.id) : "";
-          const hIn = (m0.proposedIn != null ? m0.proposedIn : m0.existingIn);
+          const exIn = (m0.existingIn != null && Number.isFinite(Number(m0.existingIn))) ? Number(m0.existingIn) : null;
+          const prIn = (m0.proposedIn != null && Number.isFinite(Number(m0.proposedIn))) ? Number(m0.proposedIn) : null;
+          const hIn = (prIn != null ? prIn : exIn);
           if (hIn == null) continue;
 
           const traceId = (m0.traceId != null) ? String(m0.traceId) : "";
           const hMid = Number(hIn) / 12;
+          if (Number.isFinite(hMid) && hMid > maxWireFt) maxWireFt = hMid;
 
           const aHIn = (aPoleId && traceId) ? poleWireHeightByPoleTrace.get(`${aPoleId}|${traceId}`) : null;
           const bHIn = (bPoleId && traceId) ? poleWireHeightByPoleTrace.get(`${bPoleId}|${traceId}`) : null;
@@ -1996,13 +2663,52 @@
           const sev = hasFail ? "fail" : hasWarn ? "warn" : "pass";
           const withOrderHalo = hasOrderWire || (hasOrder && cls.kind === "comm");
 
-          const color = wireColor(sev, kindKey);
+          const isProposedWire = (prIn != null) && (exIn == null || Math.abs(prIn - exIn) >= 1);
+
+          const isInstallPulse = !!(
+            installPulseWireMat &&
+            installingCompanyKey &&
+            sev === "pass" &&
+            normalizeOwnerKey(cls.owner) === installingCompanyKey
+          );
+
+          const isMessenger = normalizeStr(`${m0.label || ""} ${m0.name || ""} ${m0.traceLabel || ""} ${m0.traceType || ""} ${m0.cableType || ""}`).includes("messenger");
+
+          const color = (isMessenger && sev === "pass") ? 0x94a3b8 : wireColor(sev, kindKey);
           const radius = isPower ? 0.26 : 0.21;
 
-          const tube = makeWire([p1, p2, p3], color, radius, withOrderHalo, sev);
+          const wirePickId = mId || `${msId}|${traceId}|${String(m0.wireId || "")}|${Math.round(Number(hIn) || 0)}`;
+          threeState.wirePickIndex.set(wirePickId, {
+            type: "wire",
+            measureId: mId || null,
+            midspanId: msId,
+            connectionId: conn || null,
+            aPoleId: aPoleId || null,
+            bPoleId: bPoleId || null,
+            traceId: traceId || null,
+            wireId: (m0.wireId != null) ? String(m0.wireId) : null,
+            owner: cls.owner || null,
+            label: String(m0.label || m0.name || cls.label || "").trim() || null,
+            kind: cls.kind || null,
+            existingIn: exIn,
+            proposedIn: prIn,
+            drawnIn: Number(hIn),
+            isProposed: !!isProposedWire,
+            severity: sev,
+          });
+
+          const tube = makeWire([p1, p2, p3], color, radius, withOrderHalo, sev, isInstallPulse ? installPulseWireMat : null, isProposedWire);
+          // Make each wire selectable in 3D.
+          try {
+            tube.traverse((o) => {
+              if (o && o.isMesh) o.userData = { entityType: "wire", entityId: wirePickId };
+            });
+            threeState.pickables.push(tube);
+          } catch (_) {}
           g.add(tube);
 
-          if (hasFail || hasWarn || withOrderHalo) {
+          // Beads should only indicate actual WARN/FAIL locations (not comm arrangement).
+          if (hasFail || hasWarn) {
             const dotG = new THREE.SphereGeometry(0.54, 14, 10);
             const dotM = new THREE.MeshStandardMaterial({
               color,
@@ -2015,6 +2721,54 @@
             g.add(dot);
           }
         }
+
+        // Status beacon for midspans (3D): mirrors pole readability.
+        // Wider + thicker halo + larger "holographic" column per user request.
+	        if (st === "fail" || st === "warn") {
+          const cSt = statusColor(st);
+          const beaconOpacity = (st === "fail") ? 0.42 : 0.34;
+          const beamOpacity = (st === "fail") ? 0.12 : 0.10;
+
+	          // Midspan hologram: use a triangular "halo" to distinguish midspans from poles.
+	          const triR = 5.25;
+	          const triY = 0.85;
+	          const a0 = Math.PI / 2;
+	          const p1 = new THREE.Vector3(pos.x + triR * Math.cos(a0), triY, pos.z + triR * Math.sin(a0));
+	          const p2 = new THREE.Vector3(pos.x + triR * Math.cos(a0 + (2 * Math.PI / 3)), triY, pos.z + triR * Math.sin(a0 + (2 * Math.PI / 3)));
+	          const p3 = new THREE.Vector3(pos.x + triR * Math.cos(a0 + (4 * Math.PI / 3)), triY, pos.z + triR * Math.sin(a0 + (4 * Math.PI / 3)));
+	          const triPath = new THREE.CurvePath();
+	          triPath.add(new THREE.LineCurve3(p1, p2));
+	          triPath.add(new THREE.LineCurve3(p2, p3));
+	          triPath.add(new THREE.LineCurve3(p3, p1));
+	          const haloG = new THREE.TubeGeometry(triPath, 54, 0.36, 10, false);
+          const haloM = new THREE.MeshBasicMaterial({
+            color: cSt,
+            transparent: true,
+            opacity: beaconOpacity,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          });
+          const halo = new THREE.Mesh(haloG, haloM);
+	          // TubeGeometry path is already in the ground plane at triY.
+          g.add(halo);
+
+          const beamH = Math.min(120, Math.max(60, (Number.isFinite(maxWireFt) ? maxWireFt : 0) + 18));
+	          // Triangular holographic column for midspans (easy pole vs midspan differentiation).
+	          const beamG = new THREE.CylinderGeometry(2.10, 2.10, beamH, 3, 1, true);
+          const beamM = new THREE.MeshBasicMaterial({
+            color: cSt,
+            transparent: true,
+            opacity: beamOpacity,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const beam = new THREE.Mesh(beamG, beamM);
+          beam.position.set(pos.x, beamH / 2, pos.z);
+          g.add(beam);
+        }
+
+	        // Comm arrangement issues: circle-only marker is rendered at the midspan node (no yellow hologram/beam).
 
         threeState.groups.midspans.add(g);
         threeState.midGroupsById.set(msId, g);
@@ -2131,22 +2885,87 @@
     box.getCenter(center);
     box.getSize(size);
 
-    const maxDim = Math.max(size.x, size.z, 1);
-    const dist = maxDim * 0.75 + 400;
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
 
-    // Center the 3D camera on the first node when available.
-    const focus = (threeState.firstNode && threeState.firstNode.isVector3)
-      ? threeState.firstNode
-      : center;
+    // Frame the entire job extents in view regardless of where the job sits on the map.
+    // Use a bounding-sphere fit against both vertical + horizontal FOV.
+    let dist = (size.length() * 0.5);
+    try {
+      const cam = threeState.camera;
+      const aspect = (cam && cam.aspect) ? cam.aspect : 1;
+      const vFov = (cam && cam.fov) ? THREE.MathUtils.degToRad(cam.fov) : (Math.PI / 3);
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+      const r = size.length() * 0.5;
+      const distV = r / Math.max(1e-6, Math.sin(vFov / 2));
+      const distH = r / Math.max(1e-6, Math.sin(hFov / 2));
+      dist = Math.max(distV, distH);
+      if (!isFinite(dist) || dist <= 0) dist = maxDim;
+      dist = Math.max(520, dist * 1.15);
+    } catch (_) {
+      dist = Math.max(520, maxDim * 0.75 + 400);
+    }
+
+    // Visualization-only: keep zoom feel consistent across job sizes.
+    try {
+      if (threeState && threeState.controls) {
+        threeState.controls.zoomStepFt = Math.max(6, Math.min(260, maxDim * 0.02));
+      }
+    } catch (_) {}
+
+    // Center the 3D camera on the job's overall extents.
+    const focus = center;
+    const dir = new THREE.Vector3(1, 0.62, 1).normalize();
 
     threeState.controls.target.copy(focus);
-    threeState.camera.position.set(focus.x + dist, focus.y + dist * 0.62, focus.z + dist);
+    threeState.camera.position.copy(focus).addScaledVector(dir, dist);
     // FreeCamControlsLite does not automatically aim the camera at the target.
     threeState.camera.lookAt(focus);
     threeState.camera.near = Math.max(0.1, dist / 2000);
     threeState.camera.far = Math.max(50000, dist * 6);
     threeState.camera.updateProjectionMatrix();
     threeState.controls.update();
+  }
+
+  // Keep camera clipping stable across both wide "Zoom to All" views and close-up
+  // inspections. Without this, large initial far/near settings can make close-up
+  // navigation feel increasingly "restricted" due to near-plane clipping.
+  function tuneThreeCameraClipping() {
+    if (!threeState || !threeState.camera || !threeState.controls) return;
+    const cam = threeState.camera;
+    const tgt = threeState.controls.target;
+    if (!tgt || !tgt.isVector3) return;
+
+    const d = cam.position.distanceTo(tgt);
+    if (!Number.isFinite(d) || d <= 0) return;
+
+    // Dynamic near plane: scales with distance but is capped to avoid clipping the basemap.
+    const desiredNear = Math.max(0.02, Math.min(75, d / 2000));
+    if (Math.abs(desiredNear - cam.near) > Math.max(0.02, cam.near * 0.15)) {
+      cam.near = desiredNear;
+      cam.updateProjectionMatrix();
+    }
+  }
+
+  // Subtle pulse for "Installing Company" highlighting in 3D.
+  // This is visualization-only and does NOT affect QC logic.
+  function updateThreeInstallPulse(nowMs) {
+    if (!threeState) return;
+    const mats = Array.isArray(threeState.installPulseMaterials) ? threeState.installPulseMaterials : [];
+    if (!mats.length) return;
+    const t = (Number(nowMs) || 0) * 0.001;
+    // Dull, non-distracting flash.
+    const wave = 0.5 + 0.5 * Math.sin(t * 2.2);
+
+    for (const m of mats) {
+      if (!m || !m.userData || !m.userData.pulse) continue;
+      const p = m.userData.pulse;
+      if (typeof p.baseEmissiveIntensity === "number" && typeof p.ampEmissiveIntensity === "number") {
+        m.emissiveIntensity = p.baseEmissiveIntensity + p.ampEmissiveIntensity * wave;
+      }
+      if (m.transparent && typeof p.baseOpacity === "number" && typeof p.ampOpacity === "number") {
+        m.opacity = p.baseOpacity + p.ampOpacity * wave;
+      }
+    }
   }
 
   function startThreeLoop() {
@@ -2166,8 +2985,14 @@
         }
       } catch (_) {}
 
+      // Dynamic clipping keeps close-up inspection usable even on very large job extents.
+      try { tuneThreeCameraClipping(); } catch (_) {}
+
       // 3D SCID labels are HTML overlays that must be re-projected each frame.
       try { updateThreeScidLabels(); } catch (_) {}
+
+      // Installing-company visual pulse (green dull flash).
+      try { updateThreeInstallPulse(now); } catch (_) {}
 
       threeState.renderer.render(threeState.scene, threeState.camera);
     };
@@ -2222,6 +3047,7 @@
     const showSpans = !!(els.toggleSpans && els.toggleSpans.checked);
 
     if (threeState.groups.spans) threeState.groups.spans.visible = showSpans;
+    if (threeState.groups.guying) threeState.groups.guying.visible = showSpans;
     if (threeState.groups.poles) threeState.groups.poles.visible = showPoles;
     if (threeState.groups.midspans) threeState.groups.midspans.visible = showMidspans;
     if (threeState.groups.issues) threeState.groups.issues.visible = true;
@@ -2322,6 +3148,26 @@
     els.btnPreview.addEventListener("click", () => runPreview());
     els.btnRunQc.addEventListener("click", () => runQc());
     els.btnReset.addEventListener("click", () => resetAll());
+
+    // Export/Import rule sets (local file).
+    if (els.btnSaveRulesFile) {
+      els.btnSaveRulesFile.addEventListener("click", () => exportRulesFile());
+    }
+    if (els.btnLoadRulesFile) {
+      els.btnLoadRulesFile.addEventListener("click", () => {
+        if (els.rulesFileInput) els.rulesFileInput.click();
+      });
+    }
+    if (els.rulesFileInput) {
+      els.rulesFileInput.addEventListener("change", async (e) => {
+        const f = e && e.target && e.target.files && e.target.files[0] ? e.target.files[0] : null;
+        // Allow picking the same file repeatedly.
+        try { e.target.value = ""; } catch (_) {}
+        if (!f) return;
+        await importRulesFile(f);
+      });
+    }
+
     els.btnResetRules.addEventListener("click", () => {
       rules = structuredClone(DEFAULT_RULES);
       saveRules(rules);
@@ -2366,13 +3212,23 @@
       if (e.key === "Escape") closeDetailsPanel();
     });
 
-    // Search
-    els.searchPole.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        searchAndFocusPole(els.searchPole.value || "");
-      }
-    });
+	    // Search
+	    if (els.searchScid) {
+	      els.searchScid.addEventListener("keydown", (e) => {
+	        if (e.key === "Enter") {
+	          e.preventDefault();
+	          searchAndFocusPoleByScid(els.searchScid.value || "");
+	        }
+	      });
+	    }
+	    if (els.searchPoleTag) {
+	      els.searchPoleTag.addEventListener("keydown", (e) => {
+	        if (e.key === "Enter") {
+	          e.preventDefault();
+	          searchAndFocusPoleByTag(els.searchPoleTag.value || "");
+	        }
+	      });
+	    }
 
     // Rules change handlers
     const ruleInputs = [
@@ -2386,12 +3242,14 @@
       els.rulePoleEnforceAdss,
       els.rulePoleEnforceEquipMove,
       els.rulePoleEnforcePowerOrder,
+      els.rulePoleNeutralSecondaryBelowTransformer,
       els.rulePoleWarnMissingIds,
 
       els.ruleMidMinDefault,
       els.ruleMidMinPed,
       els.ruleMidMinHwy,
       els.ruleMidMinFarm,
+      els.ruleMidMinRail,
       els.ruleMidCommSep,
       els.ruleMidCommToPower,
       els.ruleMidAdssCommToPower,
@@ -2657,6 +3515,9 @@
     // Riser equipment: allowed to move per the QC logic (see equipment movement rule).
     const isRiser = s.includes("riser");
 
+    // Transformer equipment (utility): used for optional neutral/secondary ordering checks.
+    const isTransformer = /\btransformer\b/.test(s) || /\bxfmr\b/.test(s) || /\bxfrmr\b/.test(s) || /\bxformer\b/.test(s);
+
     const isDripLoop = s.includes("drip loop") || s.includes("driploop");
 
     // Street light detection
@@ -2714,6 +3575,7 @@
       isStreetLight,
       isStreetLightDripLoop,
       isStreetLightFeed,
+      isTransformer,
     };
   }
 
@@ -3526,6 +4388,39 @@
       }
     }
 
+    // Neutral and Secondaries must be below transformers (optional; disabled by default).
+    // IMPORTANT: When this rule is enabled, "below transformer" means below *all* transformer
+    // points — i.e., below both the top and the bottom measurement points when present.
+    if (rules.pole.enforceNeutralSecondaryBelowTransformer) {
+      const transformers = atts.filter(a => String(a.category || "").toLowerCase() === "equipment" && a._cls.isTransformer && getH(a) != null);
+      if (transformers.length) {
+        const tHeights = transformers.map(getH).filter((v) => v != null);
+        if (tHeights.length) {
+          const tBottom = Math.min(...tHeights);
+          const tTop = Math.max(...tHeights);
+
+          const nsWires = atts.filter(a => (a._cls.kind === "power_neutral" || a._cls.kind === "power_secondary") && getH(a) != null);
+          for (const w of nsWires) {
+            const h = getH(w);
+            if (h == null) continue;
+            if (h >= tBottom) {
+              const tIds = attachmentIdsOf(transformers);
+              const wIds = attachmentIdsOf(w);
+              const attIds = Array.from(new Set([...wIds, ...tIds]));
+
+              const wLabel = (w.label || w.traceLabel || w.name || w.traceType || w.cableType || "wire");
+              const tLabel = transformers[0] && (transformers[0].label || transformers[0].traceLabel || transformers[0].name || transformers[0].comments) ? (transformers[0].label || transformers[0].traceLabel || transformers[0].name || transformers[0].comments) : "transformer";
+
+              const spanNote = (tTop !== tBottom) ? ` (top ${fmtFtIn(tTop)}, bottom ${fmtFtIn(tBottom)})` : "";
+              issues.push(issue("FAIL", "pole", String(pole.poleId), poleName, "POLE.NS_BELOW_XFMR",
+                `Power ordering violation: ${wLabel} at ${fmtFtIn(h)} must be below all parts of the ${tLabel}${spanNote}.`,
+                { wireHeight: h, transformerTop: tTop, transformerBottom: tBottom, attachmentIds: attIds }));
+            }
+          }
+        }
+      }
+    }
+
     return {
       status: deriveStatus(issues),
       issues,
@@ -3827,6 +4722,10 @@
       const ms = (model.midspanPoints || []).find(m => String(m.midspanId) === String(sel.id));
       if (!ms) return;
       renderMidspanDetails(ms);
+    } else if (sel.type === "wire") {
+      renderWireDetails(sel.id);
+    } else if (sel.type === "guy" || sel.type === "downguy") {
+      renderGuyDetails(sel.type, sel.id);
     }
 
     openDetailsPanel(sel.latlng || null);
@@ -3992,6 +4891,154 @@
             </tr>
           </thead>
           <tbody>${rows || `<tr><td colspan="5" class="muted">No midspan measures.</td></tr>`}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderWireDetails(wirePickId) {
+    const id = String(wirePickId || "");
+    const info = (threeState && threeState.wirePickIndex && threeState.wirePickIndex.get) ? threeState.wirePickIndex.get(id) : null;
+    if (!info) {
+      els.details.innerHTML = `<div class="muted">Wire details not available.</div>`;
+      return;
+    }
+
+    const st = String(info.severity || "unknown").toLowerCase();
+    const title = escapeHtml(info.label || "Wire");
+    const owner = escapeHtml(info.owner || "");
+    const kind = escapeHtml(info.kind || "");
+    const measureId = escapeHtml(info.measureId || "");
+    const traceId = escapeHtml(info.traceId || "");
+    const connId = escapeHtml(info.connectionId || "");
+    const aPoleId = escapeHtml(info.aPoleId || "");
+    const bPoleId = escapeHtml(info.bPoleId || "");
+
+    const ex = (info.existingIn != null) ? fmtFtIn(info.existingIn) : "";
+    const pr = (info.proposedIn != null) ? fmtFtIn(info.proposedIn) : "";
+    const drawn = (info.drawnIn != null) ? fmtFtIn(info.drawnIn) : "";
+    const proposedFlag = info.isProposed ? "Yes (flashing in 3D)" : "No";
+
+    // Inline issue list for this specific measured wire (if the job provides a stable measure id).
+    let issuesHtml = `<div class="muted">No issues.</div>`;
+    try {
+      const all = qcResults && Array.isArray(qcResults.issues) ? qcResults.issues : [];
+      const midIssues = [];
+      if (info.measureId) {
+        for (const iss of all) {
+          const ctx = iss && iss.context ? iss.context : {};
+          const mIds = Array.isArray(ctx.measureIds) ? ctx.measureIds : [];
+          if (mIds.map(String).includes(String(info.measureId))) midIssues.push(iss);
+        }
+      }
+      if (midIssues.length) {
+        issuesHtml = `<ul class="issue-list">${midIssues.map(i => `<li class="issue issue--${i.severity === "FAIL" ? "fail" : "warn"}">
+            <div class="issue-code">${escapeHtml(i.ruleCode)}</div>
+            <div class="issue-msg">${escapeHtml(i.message)}</div>
+          </li>`).join("")}</ul>`;
+      }
+    } catch (_) {}
+
+    els.details.innerHTML = `
+      <div class="details-header">
+        <div>
+          <div class="details-title">${title}</div>
+          <div class="muted">Wire${kind ? ` • ${kind}` : ""}</div>
+        </div>
+        <div><span class="badge badge--${st}">${escapeHtml(st.toUpperCase())}</span></div>
+      </div>
+
+      <h3 class="details-subtitle">Summary</h3>
+      <div class="table-wrap">
+        <table class="table table--small">
+          <tbody>
+            <tr><th>Owner</th><td>${owner || `<span class="muted">—</span>`}</td></tr>
+            <tr><th>Proposed</th><td>${escapeHtml(proposedFlag)}</td></tr>
+            <tr><th>Midspan ID</th><td>${escapeHtml(info.midspanId || "")}</td></tr>
+            <tr><th>Connection ID</th><td>${connId || `<span class="muted">—</span>`}</td></tr>
+            <tr><th>Endpoints</th><td>${aPoleId && bPoleId ? `${aPoleId} ↔ ${bPoleId}` : `<span class="muted">—</span>`}</td></tr>
+            <tr><th>Trace ID</th><td>${traceId || `<span class="muted">—</span>`}</td></tr>
+            <tr><th>Measure ID</th><td>${measureId || `<span class="muted">—</span>`}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="details-subtitle">Heights</h3>
+      <div class="table-wrap">
+        <table class="table table--small">
+          <thead>
+            <tr>
+              <th>Existing</th>
+              <th>Proposed</th>
+              <th>Shown in 3D</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${escapeHtml(ex || "—")}</td>
+              <td>${escapeHtml(pr || "—")}</td>
+              <td>${escapeHtml(drawn || "—")}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="details-subtitle">Issues</h3>
+      ${issuesHtml}
+    `;
+  }
+
+  function renderGuyDetails(kind, guyPickId) {
+    const id = String(guyPickId || "");
+    const info = (threeState && threeState.guyPickIndex && threeState.guyPickIndex.get) ? threeState.guyPickIndex.get(id) : null;
+    if (!info) {
+      els.details.innerHTML = `<div class="muted">Guying details not available.</div>`;
+      return;
+    }
+
+    const title = kind === "downguy" ? "Downguy" : "Guying";
+    const ex = (info.existingIn != null) ? fmtFtIn(info.existingIn) : "";
+    const pr = (info.proposedIn != null) ? fmtFtIn(info.proposedIn) : "";
+    const isProposed = info.proposedIn != null && (info.existingIn == null || Math.abs(info.proposedIn - info.existingIn) >= 1);
+    const proposedFlag = isProposed ? "Yes (flashing in 3D)" : "No";
+
+    els.details.innerHTML = `
+      <div class="details-header">
+        <div>
+          <div class="details-title">${escapeHtml(title)}</div>
+          <div class="muted">Pole ID: ${escapeHtml(info.poleId || "")}${info.anchorId ? ` • Anchor: ${escapeHtml(info.anchorId)}` : ""}</div>
+        </div>
+        <div><span class="badge badge--unknown">${escapeHtml(String(info.variant || "").toUpperCase() || "LINE")}</span></div>
+      </div>
+
+      <h3 class="details-subtitle">Summary</h3>
+      <div class="table-wrap">
+        <table class="table table--small">
+          <tbody>
+            <tr><th>Type</th><td>${escapeHtml(title)}</td></tr>
+            <tr><th>Variant</th><td>${escapeHtml(String(info.variant || "").toUpperCase())}</td></tr>
+            <tr><th>Proposed</th><td>${escapeHtml(proposedFlag)}</td></tr>
+            <tr><th>Anchor type</th><td>${escapeHtml(String(info.anchorType || ""))}</td></tr>
+            <tr><th>Trace ID</th><td>${escapeHtml(String(info.traceId || "")) || `<span class="muted">—</span>`}</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="details-subtitle">Heights</h3>
+      <div class="table-wrap">
+        <table class="table table--small">
+          <thead>
+            <tr>
+              <th>Existing</th>
+              <th>Proposed</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>${escapeHtml(ex || "—")}</td>
+              <td>${escapeHtml(pr || "—")}</td>
+            </tr>
+          </tbody>
         </table>
       </div>
     `;
@@ -4196,6 +5243,109 @@
 
 
   // ────────────────────────────────────────────────────────────────────────────
+  //  Rules: Export / Import (local file)
+  // ────────────────────────────────────────────────────────────────────────────
+
+  function exportRulesFile() {
+    try {
+      const now = new Date();
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const stamp = `${now.getFullYear()}${pad2(now.getMonth() + 1)}${pad2(now.getDate())}_${pad2(now.getHours())}${pad2(now.getMinutes())}${pad2(now.getSeconds())}`;
+      const base = safeFilename((model && model.jobName) ? model.jobName : (fileName || "rules"));
+
+      const payload = {
+        schema: "katapultQcRules",
+        schemaVersion: 1,
+        exportedAt: now.toISOString(),
+        rules,
+      };
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `katapult_qc_rules_${base}_${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      logLine(`Saved rules to file: katapult_qc_rules_${base}_${stamp}.json`);
+    } catch (err) {
+      logLine(`Failed to save rules file: ${err && err.message ? err.message : String(err)}`);
+    }
+  }
+
+  function coerceImportedRules(obj) {
+    const src = (obj && typeof obj === "object" && obj.rules && typeof obj.rules === "object") ? obj.rules : obj;
+    if (!src || typeof src !== "object") return structuredClone(DEFAULT_RULES);
+
+    const merged = {
+      pole: { ...DEFAULT_RULES.pole, ...(src.pole && typeof src.pole === "object" ? src.pole : {}) },
+      midspan: { ...DEFAULT_RULES.midspan, ...(src.midspan && typeof src.midspan === "object" ? src.midspan : {}) },
+    };
+
+    const numOr = (v, fb) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fb;
+    };
+
+    // Pole numeric fields
+    merged.pole.minLowestCommAttachIn = numOr(merged.pole.minLowestCommAttachIn, DEFAULT_RULES.pole.minLowestCommAttachIn);
+    merged.pole.commSepDiffIn = numOr(merged.pole.commSepDiffIn, DEFAULT_RULES.pole.commSepDiffIn);
+    merged.pole.commSepSameIn = numOr(merged.pole.commSepSameIn, DEFAULT_RULES.pole.commSepSameIn);
+    merged.pole.commToPowerSepIn = numOr(merged.pole.commToPowerSepIn, DEFAULT_RULES.pole.commToPowerSepIn);
+    merged.pole.adssCommToPowerSepIn = numOr(merged.pole.adssCommToPowerSepIn, DEFAULT_RULES.pole.adssCommToPowerSepIn);
+    merged.pole.commToStreetLightSepIn = numOr(merged.pole.commToStreetLightSepIn, DEFAULT_RULES.pole.commToStreetLightSepIn);
+    merged.pole.movedHoleBufferIn = numOr(merged.pole.movedHoleBufferIn, DEFAULT_RULES.pole.movedHoleBufferIn);
+
+    // Pole boolean fields
+    merged.pole.enforceAdssHighest = !!merged.pole.enforceAdssHighest;
+    merged.pole.enforceEquipmentMove = !!merged.pole.enforceEquipmentMove;
+    merged.pole.enforcePowerOrder = !!merged.pole.enforcePowerOrder;
+    merged.pole.enforceNeutralSecondaryBelowTransformer = !!merged.pole.enforceNeutralSecondaryBelowTransformer;
+    merged.pole.warnMissingPoleIdentifiers = !!merged.pole.warnMissingPoleIdentifiers;
+
+    // Midspan numeric fields
+    merged.midspan.minCommDefaultIn = numOr(merged.midspan.minCommDefaultIn, DEFAULT_RULES.midspan.minCommDefaultIn);
+    merged.midspan.minCommPedestrianIn = numOr(merged.midspan.minCommPedestrianIn, DEFAULT_RULES.midspan.minCommPedestrianIn);
+    merged.midspan.minCommHighwayIn = numOr(merged.midspan.minCommHighwayIn, DEFAULT_RULES.midspan.minCommHighwayIn);
+    merged.midspan.minCommFarmIn = numOr(merged.midspan.minCommFarmIn, DEFAULT_RULES.midspan.minCommFarmIn);
+    merged.midspan.minCommRailIn = numOr(merged.midspan.minCommRailIn, DEFAULT_RULES.midspan.minCommRailIn);
+    merged.midspan.commSepIn = numOr(merged.midspan.commSepIn, DEFAULT_RULES.midspan.commSepIn);
+    merged.midspan.commToPowerSepIn = numOr(merged.midspan.commToPowerSepIn, DEFAULT_RULES.midspan.commToPowerSepIn);
+    merged.midspan.adssCommToPowerSepIn = numOr(merged.midspan.adssCommToPowerSepIn, DEFAULT_RULES.midspan.adssCommToPowerSepIn);
+    merged.midspan.installingCompanyCommSepIn = numOr(merged.midspan.installingCompanyCommSepIn, DEFAULT_RULES.midspan.installingCompanyCommSepIn);
+
+    // Midspan other fields
+    merged.midspan.installingCompany = String(merged.midspan.installingCompany || "").trim();
+    merged.midspan.enforceAdssHighest = !!merged.midspan.enforceAdssHighest;
+    merged.midspan.warnMissingRowType = !!merged.midspan.warnMissingRowType;
+
+    return merged;
+  }
+
+  async function importRulesFile(file) {
+    try {
+      const name = file && file.name ? String(file.name) : "(rules.json)";
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const nextRules = coerceImportedRules(parsed);
+
+      rules = nextRules;
+      saveRules(rules);
+      applyRulesToUi();
+      if (model) recomputeQc();
+
+      logLine(`Loaded rules from file: ${name}`);
+    } catch (err) {
+      logLine(`Failed to load rules file: ${err && err.message ? err.message : String(err)}`);
+    }
+  }
+
+
+  // ────────────────────────────────────────────────────────────────────────────
   //  Rules UI
   // ────────────────────────────────────────────────────────────────────────────
 
@@ -4212,6 +5362,9 @@
     els.rulePoleEnforceAdss.checked = !!rules.pole.enforceAdssHighest;
     els.rulePoleEnforceEquipMove.checked = !!rules.pole.enforceEquipmentMove;
     els.rulePoleEnforcePowerOrder.checked = !!rules.pole.enforcePowerOrder;
+    if (els.rulePoleNeutralSecondaryBelowTransformer) {
+      els.rulePoleNeutralSecondaryBelowTransformer.checked = !!rules.pole.enforceNeutralSecondaryBelowTransformer;
+    }
     els.rulePoleWarnMissingIds.checked = !!rules.pole.warnMissingPoleIdentifiers;
 
     // Midspan
@@ -4219,6 +5372,7 @@
     els.ruleMidMinPed.value = fmtFtIn(rules.midspan.minCommPedestrianIn);
     els.ruleMidMinHwy.value = fmtFtIn(rules.midspan.minCommHighwayIn);
     els.ruleMidMinFarm.value = fmtFtIn(rules.midspan.minCommFarmIn);
+    if (els.ruleMidMinRail) els.ruleMidMinRail.value = fmtFtIn(rules.midspan.minCommRailIn);
 
     els.ruleMidCommSep.value = String(rules.midspan.commSepIn);
     els.ruleMidCommToPower.value = String(rules.midspan.commToPowerSepIn);
@@ -4248,6 +5402,9 @@
     r.pole.enforceAdssHighest = !!els.rulePoleEnforceAdss.checked;
     r.pole.enforceEquipmentMove = !!els.rulePoleEnforceEquipMove.checked;
     r.pole.enforcePowerOrder = !!els.rulePoleEnforcePowerOrder.checked;
+    if (els.rulePoleNeutralSecondaryBelowTransformer) {
+      r.pole.enforceNeutralSecondaryBelowTransformer = !!els.rulePoleNeutralSecondaryBelowTransformer.checked;
+    }
     r.pole.warnMissingPoleIdentifiers = !!els.rulePoleWarnMissingIds.checked;
 
     // Midspan
@@ -4255,6 +5412,7 @@
     r.midspan.minCommPedestrianIn = parseFtIn(els.ruleMidMinPed.value, DEFAULT_RULES.midspan.minCommPedestrianIn);
     r.midspan.minCommHighwayIn = parseFtIn(els.ruleMidMinHwy.value, DEFAULT_RULES.midspan.minCommHighwayIn);
     r.midspan.minCommFarmIn = parseFtIn(els.ruleMidMinFarm.value, DEFAULT_RULES.midspan.minCommFarmIn);
+    if (els.ruleMidMinRail) r.midspan.minCommRailIn = parseFtIn(els.ruleMidMinRail.value, DEFAULT_RULES.midspan.minCommRailIn);
 
     r.midspan.commSepIn = parseIntSafe(els.ruleMidCommSep.value, DEFAULT_RULES.midspan.commSepIn);
     r.midspan.commToPowerSepIn = parseIntSafe(els.ruleMidCommToPower.value, DEFAULT_RULES.midspan.commToPowerSepIn);
@@ -4272,6 +5430,120 @@
   // ────────────────────────────────────────────────────────────────────────────
   //  Search
   // ────────────────────────────────────────────────────────────────────────────
+
+	function normalizeKey(s) {
+	  // Normalize user input / identifiers so searches are resilient to spacing, dashes, etc.
+	  // (visualization-only; no impact to QC logic)
+	  return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+	}
+
+	function threeFocusOnGroup(group) {
+	  if (!threeState || !threeState.camera || !threeState.controls || !group) return false;
+	  try {
+	    const box = new THREE.Box3().setFromObject(group);
+	    if (!box || box.isEmpty()) return false;
+	    const center = new THREE.Vector3();
+	    box.getCenter(center);
+	    const cam = threeState.camera;
+	    const ctl = threeState.controls;
+	
+	    const offset = new THREE.Vector3().copy(cam.position).sub(ctl.target);
+	    ctl.target.copy(center);
+	    cam.position.copy(center).add(offset);
+	    cam.lookAt(ctl.target);
+	    if (typeof ctl.update === "function") ctl.update(0);
+	    return true;
+	  } catch (_) {
+	    return false;
+	  }
+	}
+
+	function focusPoleId(poleId) {
+	  const id = String(poleId || "");
+	  if (!id) return;
+
+	  // Prefer focusing the current view mode.
+	  if (viewMode === "3d" && threeState && threeState.poleGroupsById) {
+	    const g = threeState.poleGroupsById.get(id);
+	    if (g && threeFocusOnGroup(g)) {
+	      selectEntity({ type: "pole", id, latlng: null });
+	      return;
+	    }
+	  }
+
+	  const marker = poleMarkers.get(id);
+	  if (marker) {
+	    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 18));
+	    marker.openPopup();
+	    selectEntity({ type: "pole", id });
+	  }
+	}
+
+	function searchAndFocusPoleByScid(query) {
+	  const raw = String(query || "").trim();
+	  if (!raw) return;
+
+	  const qKey0 = normalizeKey(raw);
+	  const qKey = qKey0.replace(/^scid/, "");
+	  if (!qKey) return;
+
+	  const list = (previewPoles && previewPoles.length) ? previewPoles : (model && model.poles ? model.poles : []);
+	  if (!list.length) return;
+
+	  let found = null;
+	  // Prefer exact match, fall back to partial contains.
+	  for (const p of list) {
+	    const v = normalizeKey(p && p.scid != null ? p.scid : "");
+	    if (!v) continue;
+	    if (v === qKey) { found = p; break; }
+	  }
+	  if (!found) {
+	    for (const p of list) {
+	      const v = normalizeKey(p && p.scid != null ? p.scid : "");
+	      if (!v) continue;
+	      if (v.includes(qKey)) { found = p; break; }
+	    }
+	  }
+
+	  if (!found) {
+	    logLine(`SCID search: no match for "${raw}".`);
+	    return;
+	  }
+	  focusPoleId(found.poleId);
+	}
+
+	function searchAndFocusPoleByTag(query) {
+	  const raw = String(query || "").trim();
+	  if (!raw) return;
+
+	  const qKey0 = normalizeKey(raw);
+	  const qKey = qKey0.replace(/^tag/, "");
+	  if (!qKey) return;
+
+	  const list = (previewPoles && previewPoles.length) ? previewPoles : (model && model.poles ? model.poles : []);
+	  if (!list.length) return;
+
+	  let found = null;
+	  // Prefer exact match, fall back to partial contains.
+	  for (const p of list) {
+	    const v = normalizeKey(p && p.poleTag != null ? p.poleTag : "");
+	    if (!v) continue;
+	    if (v === qKey) { found = p; break; }
+	  }
+	  if (!found) {
+	    for (const p of list) {
+	      const v = normalizeKey(p && p.poleTag != null ? p.poleTag : "");
+	      if (!v) continue;
+	      if (v.includes(qKey)) { found = p; break; }
+	    }
+	  }
+
+	  if (!found) {
+	    logLine(`Pole Tag search: no match for "${raw}".`);
+	    return;
+	  }
+	  focusPoleId(found.poleId);
+	}
 
   function searchAndFocusPole(query) {
     const q = normalizeStr(query).trim();

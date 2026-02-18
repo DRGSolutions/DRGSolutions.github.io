@@ -118,9 +118,14 @@
             </select>
           </div>
 
+          <div class="field field--search field--search--short">
+            <span>Find SCID</span>
+            <input id="searchScid" type="text" placeholder="e.g., 1234" />
+          </div>
+
           <div class="field field--search">
-            <span>Find (SCID / Pole Tag)</span>
-            <input id="searchPole" type="text" placeholder="e.g., SCID 1234 or TAG A-12" />
+            <span>Find Pole Tag</span>
+            <input id="searchPoleTag" type="text" placeholder="e.g., A-12" />
           </div>
 
           <div class="actions">
@@ -139,7 +144,7 @@
               <div class="legend-title">3D Camera Controls</div>
               <div class="legend-row"><span class="legend-key">Left Drag</span> Pan</div>
               <div class="legend-row"><span class="legend-key">Right Drag</span> Orbit</div>
-              <div class="legend-row"><span class="legend-key">Wheel</span> Zoom</div>
+              <div class="legend-row"><span class="legend-key">Wheel / + / -</span> Zoom</div>
               <div class="legend-row"><span class="legend-key">W / A / S / D</span> Move</div>
               <div class="legend-row"><span class="legend-key">Q / E</span> Down / Up</div>
               <div class="legend-row"><span class="legend-key">Shift</span> Faster</div>
@@ -152,6 +157,14 @@
               <div class="legend-row"><span class="legend-swatch legend-swatch--fail"></span> Fail</div>
               <div class="legend-row"><span class="legend-swatch legend-swatch--midspan"></span> Midspan</div>
               <div class="legend-row"><span class="legend-swatch legend-swatch--halo"></span> Comm arrangement issue</div>
+
+              <!-- 3D-only visual legend entries -->
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--power"></span> Power wires (pass)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--proposed"></span> Proposed items (flash)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--equipment"></span> Transformer / Streetlight</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--guy-proposed"></span> Guying / Downguy (proposed • flashing)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--guy-existing"></span> Guying / Downguy (existing)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--install"></span> Installing company</div>
             </div>
           </div>
 
@@ -179,6 +192,9 @@
             </p>
           </div>
           <div class="actions">
+            <button id="btnSaveRulesFile" class="secondary">Save Rules</button>
+            <button id="btnLoadRulesFile" class="ghost">Load Rules</button>
+            <input id="rulesFileInput" type="file" accept=".json,application/json" class="is-hidden" />
             <button id="btnResetRules" class="ghost" disabled>Reset Rules to NESC Defaults</button>
           </div>
         </div>
@@ -247,6 +263,10 @@
                 <span>Enforce neutral/secondary ordering rule</span>
               </label>
               <label class="toggle">
+                <input id="rulePoleNeutralSecondaryBelowTransformer" type="checkbox" />
+                <span>Neutral and Secondaries must be below transformers</span>
+              </label>
+              <label class="toggle">
                 <input id="rulePoleWarnMissingIds" type="checkbox" />
                 <span>Warn if Pole Spec / Pole Tag / SCID missing</span>
               </label>
@@ -276,6 +296,19 @@
                 <span>Farm access lowest comm (ft/in)</span>
                 <input id="ruleMidMinFarm" type="text" placeholder="18' 0&quot;" />
               </label>
+            </div>
+
+            <div class="rule-row">
+              <label class="field">
+                <span>Rail lowest comm (ft/in)</span>
+                <input id="ruleMidMinRail" type="text" placeholder="23' 6&quot;" />
+              </label>
+              <div class="field">
+                <span>Applies to ROW type</span>
+                <div class="muted" style="line-height:1.35;">
+                  Used when the midspan ROW type is classified as “Rail”.
+                </div>
+              </div>
             </div>
 
             <div class="rule-row">
@@ -628,10 +661,14 @@ self.onmessage = async (ev) => {
 
               const t = traces[traceId] || {};
               const owner = t.company || "";
+              const traceProposed = !!(t && t.proposed);
               const traceType = (t._trace_type != null ? String(t._trace_type) : "");
               const cableType = (t.cable_type != null ? String(t.cable_type) : "");
               const label = normalizeCableType(t, baseRounded);
 
+              // Katapult flags newly-proposed facilities at the trace level.
+              // For proposed traces, the measured height should be treated as
+              // proposed-only (no existing facility at that height).
               point.measures.push({
                 id: `${String(traceId)}|${String(wireId)}|${String(proposed)}`,
                 traceId: String(traceId),
@@ -640,9 +677,10 @@ self.onmessage = async (ev) => {
                 cableType,
                 label,
                 wireId: String(wireId),
-                existingIn: baseRounded,
+                traceProposed,
+                existingIn: traceProposed ? null : baseRounded,
                 proposedIn: proposed,
-                existingHeight: inchesToFtIn(baseRounded),
+                existingHeight: traceProposed ? "" : inchesToFtIn(baseRounded),
                 proposedHeight: inchesToFtIn(proposed),
               });
             }
@@ -659,6 +697,9 @@ self.onmessage = async (ev) => {
     }
 
 progress(42, "Processing pole attachments…");
+
+    const guyLinesOut = []
+    const seenGuyLineKey = new Set()
 
     const polesOut = [];
     const orderedPoleIds = orderPoleIds(poleIdsToProcess, nodes, connections);
@@ -728,22 +769,58 @@ progress(42, "Processing pole attachments…");
         // Wires (incl. arms/insulators/messengers/direct wires)
         extractWireRows(pf, traces, rows, seenKey, c.pid);
 
-        // Guys
+        // Guys (down guys): include in pole attachments AND emit anchor geometry for 3D downguy rendering.
         if (options.includeGuys) {
           const guys = pf.guying || {};
           for (const gid in guys) {
             const g = guys[gid];
-            const traceId = g._trace;
+            const traceId = (g && g._trace != null) ? String(g._trace) : "";
             if (!traceId) continue;
+
             const h = getHeightInches(g);
             if (h == null) continue;
             const move = getMoveInches(g);
-            const row = makeRow(traceId, traces[traceId] || {}, h, h + move, { category: "Guy" });
-            const sortIn = row.sortHeightInches;
+            const proposed = h + move;
+
+            const t = traces[traceId] || {};
+            const owner = (t && t.company != null) ? String(t.company) : "";
+            const traceProposed = !!(t && t.proposed);
+            const label = (t && t.label != null) ? String(t.label) : ((t && t.name != null) ? String(t.name) : "Down Guy");
+
+            // Katapult flags newly-proposed facilities at the trace level.
+            // For proposed guying, treat the measured height as proposed-only.
+            const row = makeRow({ traceId, category: "Guy", owner, existingIn: traceProposed ? null : h, proposedIn: proposed, comments: label });
+            const sortIn = row._sortIn;
             const key = `Guy|${traceId}|${Math.round(sortIn)}`;
             if (!seenKey.has(key)) {
               seenKey.add(key);
               rows.push(row);
+            }
+
+            // Guy line output (for 3D): tie the guy attachment height to the anchor node location.
+            const anchorId = (g && (g.anchor_id != null || g.anchorId != null)) ? String(g.anchor_id != null ? g.anchor_id : g.anchorId) : "";
+            const guyingType = (g && (g.guying_type != null || g.guyingType != null)) ? String(g.guying_type != null ? g.guying_type : g.guyingType) : "";
+            const lineKey = `${poleId}|${anchorId}|${traceId}|${Math.round(sortIn)}`;
+            if (!seenGuyLineKey.has(lineKey)) {
+              seenGuyLineKey.add(lineKey);
+
+              const anchorNode = anchorId ? nodes[anchorId] : null;
+              const anchorLat = anchorNode && anchorNode.latitude != null ? parseNumberMaybe(anchorNode.latitude) : null;
+              const anchorLon = anchorNode && anchorNode.longitude != null ? parseNumberMaybe(anchorNode.longitude) : null;
+              const anchorType = anchorNode ? (getNodeType(anchorNode) || "") : "";
+
+              guyLinesOut.push({
+                poleId: String(poleId),
+                anchorId,
+                anchorType,
+                anchorLat,
+                anchorLon,
+                traceId,
+                traceProposed,
+                existingIn: traceProposed ? null : h,
+                proposedIn: proposed,
+                guyingType,
+              });
             }
           }
         }
@@ -924,6 +1001,7 @@ polesOut.push({
       poles: polesOut,
       midspanPoints: midspanPointsOut,
       spans: spanLinesOut,
+      guyLines: guyLinesOut,
       companies: Array.from(new Set(Object.values(traces).map(t => (t && t.company ? String(t.company) : "")).filter(Boolean))).sort(),
     };
 

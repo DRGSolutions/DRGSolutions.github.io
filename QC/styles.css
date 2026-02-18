@@ -75,6 +75,7 @@ a { color: inherit; }
   color: var(--muted);
 }
 .field--search { min-width: 320px; }
+.field--search--short { min-width: 160px; width: 160px; }
 
 input[type="file"] {
   width: 100%;
@@ -383,6 +384,8 @@ body.is-3d #basemap3dGroup {
 /* Show camera controls legend only in 3D mode. */
 .legend--controls { display: none; }
 body.is-3d .legend--controls { display: block; }
+.legend-row--3d { display: none; }
+body.is-3d .legend-row--3d { display: flex; }
 .legend-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
 .legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.20); }
 .legend-swatch--pass { background: rgba(34,197,94,0.85); }
@@ -400,6 +403,71 @@ body.is-3d .legend--controls { display: block; }
   border-radius: 999px;
   border: 2px solid rgba(250, 204, 21, 0.95);
   box-shadow: 0 0 0 3px rgba(250, 204, 21, 0.14);
+}
+
+/* 3D-only swatches */
+.legend-swatch--power { background: rgba(139, 92, 246, 0.68); }
+.legend-swatch--equipment { background: rgba(139, 92, 246, 0.42); border-color: rgba(139, 92, 246, 0.55); }
+
+.legend-swatch--proposed {
+  background: transparent;
+  position: relative;
+}
+.legend-swatch--proposed::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(148, 163, 184, 0.95);
+  border-radius: 999px;
+  animation: proposedPulse 2.85s ease-in-out infinite;
+}
+
+.legend-swatch--guy-proposed,
+.legend-swatch--guy-existing {
+  background: transparent;
+  position: relative;
+}
+.legend-swatch--guy-proposed::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(148, 163, 184, 0.95);
+  border-radius: 999px;
+  animation: proposedPulse 2.85s ease-in-out infinite;
+}
+.legend-swatch--guy-existing::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 50%;
+  height: 3px;
+  transform: translateY(-50%);
+  background: rgba(148, 163, 184, 0.55);
+  border-radius: 999px;
+}
+
+.legend-swatch--install {
+  background: rgba(34, 197, 94, 0.65);
+  animation: installPulse 1.35s ease-in-out infinite;
+}
+
+@keyframes installPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1.0; }
+}
+
+@keyframes proposedPulse {
+  0%, 100% { opacity: 0.50; }
+  50% { opacity: 1.0; }
 }
 
 /* 3D wire legend swatches */
@@ -897,4 +965,30 @@ body.is-3d .legend--controls { display: block; }
   text-shadow: 0 1px 0 rgba(0,0,0,0.35);
   backdrop-filter: blur(6px);
   white-space: nowrap;
+}
+
+.three-scid-label--pass {
+  border-color: rgba(34, 197, 94, 0.42);
+}
+
+.three-scid-label--warn {
+  border-color: rgba(245, 158, 11, 0.70);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.16), 0 0 22px rgba(245, 158, 11, 0.12);
+}
+
+.three-scid-label--fail {
+  border-color: rgba(239, 68, 68, 0.78);
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18), 0 0 24px rgba(239, 68, 68, 0.13);
+}
+
+.three-scid-label--order {
+  position: absolute;
+}
+.three-scid-label--order::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 999px;
+  border: 1px dashed rgba(250, 204, 21, 0.80);
+  box-shadow: 0 0 20px rgba(250, 204, 21, 0.14);
 }
