@@ -14,12 +14,12 @@
   <header class="app-header">
     <div class="container container--wide">
       <div class="app-header__title">
-        <h1>Katapult NESC QC Map</h1>
+        <h1>DRG Self-QC Map</h1>
         <div class="version-block muted">
-          <div class="version-block__title">Version 3.1</div>
-          <div>-NEW 3D view! (walkout your jobs in 3D - you can even change the basemaps)</div>
-          <div>-Comm ordering violations circled in yellow</div>
-          <div>-Updated midspan ROW logic</div>
+          <div class="version-block__title">Version 3.5</div>
+          <div>-3D walkout view has better controls and visuals. -Fixed violation repeats (earlier version had issues with counting correctly, few violations were counted twice)</div>
+          <div>-Comm ordering violations circled in yellow (This is now also seen in the 3D view). -Users are able to save and load their custom rule sets now.</div>
+          <div>-Added additional pole rule (OFF by default) for checking to ensure secondaries and neutrals are below transformers.</div>
         </div>
         <p class="muted">
           <a href="Help.html" target="_blank" rel="noopener noreferrer"
@@ -75,8 +75,8 @@
     </section>
 
     <div class="tabs">
-      <button class="tab-btn active" data-tab="map">Map</button>
-      <button class="tab-btn" data-tab="rules">Rules</button>
+      <button class="tab-btn" data-tab="map">Map</button>
+      <button class="tab-btn active" data-tab="rules">Rules</button>
       <button class="tab-btn" data-tab="issues">Issues</button>
       <button class="tab-btn" data-tab="log">Log</button>
     </div>
@@ -160,9 +160,9 @@
 
               <!-- 3D-only visual legend entries -->
               <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--power"></span> Power wires (pass)</div>
-              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--proposed"></span> Proposed items (flash)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--proposed"></span> Proposed items (selected installing company • flash)</div>
               <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--equipment"></span> Transformer / Streetlight</div>
-              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--guy-proposed"></span> Guying / Downguy (proposed • flashing)</div>
+              <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--guy-proposed"></span> Guying / Downguy (proposed • flash — selected installing company)</div>
               <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--guy-existing"></span> Guying / Downguy (existing)</div>
               <div class="legend-row legend-row--3d"><span class="legend-swatch legend-swatch--install"></span> Installing company</div>
             </div>
@@ -816,6 +816,7 @@ progress(42, "Processing pole attachments…");
                 anchorLat,
                 anchorLon,
                 traceId,
+                owner: owner ? String(owner) : "",
                 traceProposed,
                 existingIn: traceProposed ? null : h,
                 proposedIn: proposed,

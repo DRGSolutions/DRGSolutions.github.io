@@ -1647,11 +1647,13 @@ function onPointerDown(e) {
     }) : null;
 
     if (installPulseWireMat) {
-      installPulseWireMat.userData.pulse = { baseOpacity: 0.22, ampOpacity: 0.18, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.12 };
+      // Make the installing-company highlight OBVIOUS (requested): opacity pulses 25% → 100%.
+      installPulseWireMat.userData.pulse = { baseOpacity: 0.25, ampOpacity: 0.75, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.12 };
       threeState.installPulseMaterials.push(installPulseWireMat);
     }
     if (installPulseBeadMat) {
-      installPulseBeadMat.userData.pulse = { baseOpacity: 0.34, ampOpacity: 0.20, baseEmissiveIntensity: 0.10, ampEmissiveIntensity: 0.16 };
+      // Make the installing-company pole bead OBVIOUS (requested): opacity pulses 25% → 100%.
+      installPulseBeadMat.userData.pulse = { baseOpacity: 0.25, ampOpacity: 0.75, baseEmissiveIntensity: 0.10, ampEmissiveIntensity: 0.16 };
       threeState.installPulseMaterials.push(installPulseBeadMat);
     }
 
@@ -2036,8 +2038,20 @@ function onPointerDown(e) {
           depthWrite: false,
         });
 
-        // Proposed guying/downguying: solid flashing gray (requested).
-        const guyMatProposed = new THREE.MeshStandardMaterial({
+        // Proposed guying/downguying: gray linework.
+        // Visual rule (3D): ONLY the selected installing company's proposed items should flash.
+        const guyMatProposedStatic = new THREE.MeshStandardMaterial({
+          color: 0x9ca3af,
+          emissive: 0x9ca3af,
+          emissiveIntensity: 0.08,
+          roughness: 0.52,
+          metalness: 0.02,
+          transparent: true,
+          opacity: 0.72,
+          depthWrite: false,
+        });
+
+        const guyMatProposedPulse = new THREE.MeshStandardMaterial({
           color: 0x9ca3af,
           emissive: 0x9ca3af,
           emissiveIntensity: 0.10,
@@ -2048,9 +2062,12 @@ function onPointerDown(e) {
           depthWrite: false,
         });
 
-        // Flash all proposed linework (3D only).
-        guyMatProposed.userData.pulse = { baseOpacity: 0.42, ampOpacity: 0.34, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.10 };
-        threeState.installPulseMaterials.push(guyMatProposed);
+        // Flash linework ONLY for the selected installing company (3D only).
+        // Make the flash OBVIOUS (requested): opacity pulses 25% → 100%.
+        if (installingCompanyKey) {
+          guyMatProposedPulse.userData.pulse = { baseOpacity: 0.25, ampOpacity: 0.75, baseEmissiveIntensity: 0.06, ampEmissiveIntensity: 0.10 };
+          threeState.installPulseMaterials.push(guyMatProposedPulse);
+        }
 
         for (const g0 of guys) {
           if (!g0) continue;
@@ -2083,6 +2100,10 @@ function onPointerDown(e) {
           const exIn = (g0.existingIn != null && Number.isFinite(Number(g0.existingIn))) ? Number(g0.existingIn) : null;
           const prIn = (g0.proposedIn != null && Number.isFinite(Number(g0.proposedIn))) ? Number(g0.proposedIn) : null;
 
+          const guyOwner = (g0.owner != null) ? String(g0.owner) : "";
+          const guyOwnerKey = normalizeOwnerKey(guyOwner);
+          const isInstallGuy = !!(installingCompanyKey && guyOwnerKey === installingCompanyKey);
+
           // Proposed detection for guying/downguys:
           // - Katapult may mark proposed facilities at the trace level (trace.proposed).
           // - Some datasets also include an explicit guying_type label containing "proposed".
@@ -2096,6 +2117,11 @@ function onPointerDown(e) {
 
           const yExisting = hasExisting ? (exIn / 12) : null;
           const yProposed = hasProposed ? (prIn / 12) : null;
+
+          // Only highlight/flash for the selected installing company when the facility itself is
+          // explicitly proposed (NOT merely because a "proposed height" exists).
+          const proposedMat = (isInstallGuy && isProposedTagged) ? guyMatProposedPulse : guyMatProposedStatic;
+          const isProposedFlashing = !!(isInstallGuy && isProposedTagged && yProposed != null);
 
           const groundY = 0.15;
           const endYExisting = isPoleToPole ? (yExisting != null ? yExisting : groundY) : groundY;
@@ -2121,6 +2147,8 @@ function onPointerDown(e) {
                 anchorType,
                 anchorId,
                 traceId,
+                owner: guyOwner,
+                isFlashingProposed: false,
                 existingIn: exIn,
                 proposedIn: prIn,
                 isPoleToPole,
@@ -2132,7 +2160,7 @@ function onPointerDown(e) {
           if (yProposed != null) {
             const p1 = new THREE.Vector3(poleXZ.x, yProposed, poleXZ.z);
             const p2 = new THREE.Vector3(anchorXZ.x, endYProposed, anchorXZ.z);
-            const seg = cylinderBetween(p1, p2, 0.30, guyMatProposed);
+            const seg = cylinderBetween(p1, p2, 0.30, proposedMat);
             if (seg) {
               const segId = `${baseKey}|proposed`;
               seg.userData = { entityType: entType, entityId: segId };
@@ -2143,6 +2171,8 @@ function onPointerDown(e) {
                 anchorType,
                 anchorId,
                 traceId,
+                owner: guyOwner,
+                isFlashingProposed: !!isProposedFlashing,
                 existingIn: exIn,
                 proposedIn: prIn,
                 isPoleToPole,
@@ -2547,7 +2577,11 @@ function onPointerDown(e) {
           const baseEI = emiss * 0.55;
           const ampEI = emiss * 0.85;
           baseMat.emissiveIntensity = baseEI;
-          baseMat.userData.pulse = { baseEmissiveIntensity: baseEI, ampEmissiveIntensity: ampEI };
+          // Make the flash OBVIOUS (requested): opacity pulses 25% → 100%.
+          baseMat.transparent = true;
+          baseMat.opacity = 1.0;
+          baseMat.depthWrite = false;
+          baseMat.userData.pulse = { baseOpacity: 0.25, ampOpacity: 0.75, baseEmissiveIntensity: baseEI, ampEmissiveIntensity: ampEI };
           threeState.installPulseMaterials.push(baseMat);
         }
 
@@ -2663,13 +2697,25 @@ function onPointerDown(e) {
           const sev = hasFail ? "fail" : hasWarn ? "warn" : "pass";
           const withOrderHalo = hasOrderWire || (hasOrder && cls.kind === "comm");
 
-          const isProposedWire = (prIn != null) && (exIn == null || Math.abs(prIn - exIn) >= 1);
+          const ownerKey = normalizeOwnerKey(cls.owner);
+
+          // A wire is considered "proposed" ONLY when Katapult flags the trace as proposed.
+          // IMPORTANT: "proposed height" (existing vs proposedIn) is NOT used to determine
+          // whether the facility itself is proposed.
+          const isProposedWire = !!(m0 && m0.traceProposed);
+
+          // Visual rule (3D): ONLY the selected installing company's proposed items should flash.
+          const isProposedForInstall = !!(
+            installingCompanyKey &&
+            ownerKey === installingCompanyKey &&
+            isProposedWire
+          );
 
           const isInstallPulse = !!(
             installPulseWireMat &&
             installingCompanyKey &&
             sev === "pass" &&
-            normalizeOwnerKey(cls.owner) === installingCompanyKey
+            ownerKey === installingCompanyKey
           );
 
           const isMessenger = normalizeStr(`${m0.label || ""} ${m0.name || ""} ${m0.traceLabel || ""} ${m0.traceType || ""} ${m0.cableType || ""}`).includes("messenger");
@@ -2694,10 +2740,11 @@ function onPointerDown(e) {
             proposedIn: prIn,
             drawnIn: Number(hIn),
             isProposed: !!isProposedWire,
+            isFlashingProposed: !!isProposedForInstall,
             severity: sev,
           });
 
-          const tube = makeWire([p1, p2, p3], color, radius, withOrderHalo, sev, isInstallPulse ? installPulseWireMat : null, isProposedWire);
+          const tube = makeWire([p1, p2, p3], color, radius, withOrderHalo, sev, isInstallPulse ? installPulseWireMat : null, isProposedForInstall);
           // Make each wire selectable in 3D.
           try {
             tube.traverse((o) => {
@@ -3583,6 +3630,36 @@ function onPointerDown(e) {
   //  QC engine
   // ────────────────────────────────────────────────────────────────────────────
 
+  // Deduplicate issues to prevent repeated counting/rendering when the same
+  // condition is detected multiple times (e.g., duplicate tagged rows).
+  function issueDedupeKey(iss) {
+    const sev = String(iss && iss.severity || "");
+    const et = String(iss && iss.entityType || "");
+    const eid = String(iss && iss.entityId || "");
+    const rc = String(iss && iss.ruleCode || "");
+    const msg = String(iss && iss.message || "");
+    const ctx = (iss && iss.context) ? iss.context : {};
+    const aIds = Array.isArray(ctx.attachmentIds)
+      ? Array.from(new Set(ctx.attachmentIds.map((v) => String(v)))).sort()
+      : [];
+    const mIds = Array.isArray(ctx.measureIds)
+      ? Array.from(new Set(ctx.measureIds.map((v) => String(v)))).sort()
+      : [];
+    return `${sev}|${et}|${eid}|${rc}|${msg}|a:${aIds.join(",")}|m:${mIds.join(",")}`;
+  }
+
+  function dedupeIssuesList(list) {
+    const out = [];
+    const seen = new Set();
+    for (const iss of (list || [])) {
+      const k = issueDedupeKey(iss);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(iss);
+    }
+    return out;
+  }
+
   function runQcEngine(model, rules) {
     const poles = model.poles || [];
     const midspans = model.midspanPoints || [];
@@ -3618,6 +3695,15 @@ function onPointerDown(e) {
       }
     }
 
+    // Ensure we do not repeat issues already found.
+    for (const r of Object.values(poleResults)) {
+      if (r && Array.isArray(r.issues)) r.issues = dedupeIssuesList(r.issues);
+    }
+    for (const r of Object.values(midResults)) {
+      if (r && Array.isArray(r.issues)) r.issues = dedupeIssuesList(r.issues);
+    }
+    const issuesDeduped = dedupeIssuesList(issues);
+
     // Recompute statuses now that span-level issues may have been added.
     for (const r of Object.values(poleResults)) {
       r.status = deriveStatus(r.issues || []);
@@ -3628,12 +3714,12 @@ function onPointerDown(e) {
       r.hasCommOrderIssue = !!(r.issues || []).some((i) => String(i.ruleCode || "").startsWith("ORDER.COMM"));
     }
 
-    const summary = summarizeResults(poleResults, midResults, issues);
+    const summary = summarizeResults(poleResults, midResults, issuesDeduped);
 
     return {
       poles: poleResults,
       midspans: midResults,
-      issues,
+      issues: issuesDeduped,
       summary,
     };
   }
@@ -4284,9 +4370,21 @@ function onPointerDown(e) {
 
       const movedFromHeights = moved.map(a => a.existingIn);
 
+      // If an attachment is moved/installed INTO an existing hole (including a hole
+      // vacated by another moved attachment), it is a hole reuse event and should
+      // NOT be treated as drilling a new hole for the keep-out/buffer rule.
+      const existingHoleHeights = new Set();
+      for (const s of stationary) {
+        if (s && s.proposedIn != null) existingHoleHeights.add(Number(s.proposedIn));
+      }
+      for (const h of movedFromHeights) {
+        if (h != null) existingHoleHeights.add(Number(h));
+      }
+      const movedOrNewNewHoles = movedOrNew.filter(a => !existingHoleHeights.has(Number(a.proposedIn)));
+
       // (a) vs moved-from holes
-      if (movedFromHeights.length && movedOrNew.length) {
-        for (const a of movedOrNew) {
+      if (movedFromHeights.length && movedOrNewNewHoles.length) {
+        for (const a of movedOrNewNewHoles) {
           for (const holeH of movedFromHeights) {
             const dh = Math.abs(a.proposedIn - holeH);
             if (dh !== 0 && dh < buffer) {
@@ -4300,8 +4398,8 @@ function onPointerDown(e) {
       }
 
       // (b) vs stationary attachments
-      if (stationary.length && movedOrNew.length) {
-        for (const a of movedOrNew) {
+      if (stationary.length && movedOrNewNewHoles.length) {
+        for (const a of movedOrNewNewHoles) {
           for (const s of stationary) {
             const dh = Math.abs(a.proposedIn - s.proposedIn);
             if (dh !== 0 && dh < buffer) {
@@ -4314,8 +4412,8 @@ function onPointerDown(e) {
       }
 
       // (c) moved/new vs moved/new
-      if (movedOrNew.length > 1) {
-        for (const [a, b] of pairwise(movedOrNew)) {
+      if (movedOrNewNewHoles.length > 1) {
+        for (const [a, b] of pairwise(movedOrNewNewHoles)) {
           const dh = Math.abs(a.proposedIn - b.proposedIn);
           if (dh !== 0 && dh < buffer) {
             issues.push(issue("FAIL", "pole", String(pole.poleId), poleName, "POLE.HOLE_BUFFER",
@@ -4917,7 +5015,6 @@ function onPointerDown(e) {
     const ex = (info.existingIn != null) ? fmtFtIn(info.existingIn) : "";
     const pr = (info.proposedIn != null) ? fmtFtIn(info.proposedIn) : "";
     const drawn = (info.drawnIn != null) ? fmtFtIn(info.drawnIn) : "";
-    const proposedFlag = info.isProposed ? "Yes (flashing in 3D)" : "No";
 
     // Inline issue list for this specific measured wire (if the job provides a stable measure id).
     let issuesHtml = `<div class="muted">No issues.</div>`;
@@ -4953,7 +5050,6 @@ function onPointerDown(e) {
         <table class="table table--small">
           <tbody>
             <tr><th>Owner</th><td>${owner || `<span class="muted">—</span>`}</td></tr>
-            <tr><th>Proposed</th><td>${escapeHtml(proposedFlag)}</td></tr>
             <tr><th>Midspan ID</th><td>${escapeHtml(info.midspanId || "")}</td></tr>
             <tr><th>Connection ID</th><td>${connId || `<span class="muted">—</span>`}</td></tr>
             <tr><th>Endpoints</th><td>${aPoleId && bPoleId ? `${aPoleId} ↔ ${bPoleId}` : `<span class="muted">—</span>`}</td></tr>
@@ -4999,8 +5095,6 @@ function onPointerDown(e) {
     const title = kind === "downguy" ? "Downguy" : "Guying";
     const ex = (info.existingIn != null) ? fmtFtIn(info.existingIn) : "";
     const pr = (info.proposedIn != null) ? fmtFtIn(info.proposedIn) : "";
-    const isProposed = info.proposedIn != null && (info.existingIn == null || Math.abs(info.proposedIn - info.existingIn) >= 1);
-    const proposedFlag = isProposed ? "Yes (flashing in 3D)" : "No";
 
     els.details.innerHTML = `
       <div class="details-header">
@@ -5017,7 +5111,6 @@ function onPointerDown(e) {
           <tbody>
             <tr><th>Type</th><td>${escapeHtml(title)}</td></tr>
             <tr><th>Variant</th><td>${escapeHtml(String(info.variant || "").toUpperCase())}</td></tr>
-            <tr><th>Proposed</th><td>${escapeHtml(proposedFlag)}</td></tr>
             <tr><th>Anchor type</th><td>${escapeHtml(String(info.anchorType || ""))}</td></tr>
             <tr><th>Trace ID</th><td>${escapeHtml(String(info.traceId || "")) || `<span class="muted">—</span>`}</td></tr>
           </tbody>
