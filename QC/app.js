@@ -5692,12 +5692,31 @@ function onPointerDown(e) {
   }
 
   function logLine(s) {
-    const line = String(s || "");
-    els.logBox.textContent += (els.logBox.textContent ? "\n" : "") + line;
-    els.logBox.scrollTop = els.logBox.scrollHeight;
-  }
 
-  function setJobName(name) {
+
+    const line = String(s || "");
+
+
+    if (!els.logBox) {
+
+
+      console.log(line);
+
+
+      return;
+
+
+    }
+
+
+    els.logBox.textContent += (els.logBox.textContent ? "\n" : "") + line;
+
+
+    els.logBox.scrollTop = els.logBox.scrollHeight;
+
+
+  }
+function setJobName(name) {
     els.jobName.textContent = String(name || "—");
   }
 

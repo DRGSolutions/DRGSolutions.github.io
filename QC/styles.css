@@ -384,8 +384,12 @@ body.is-3d #basemap3dGroup {
 /* Show camera controls legend only in 3D mode. */
 .legend--controls { display: none; }
 body.is-3d .legend--controls { display: block; }
-.legend-row--3d { display: none; }
-body.is-3d .legend-row--3d { display: flex; }
+
+/* Separate QC legends for 2D vs 3D views. */
+.legend--qc3d { display: none; }
+body.is-3d .legend--qc2d { display: none; }
+body.is-3d .legend--qc3d { display: block; }
+
 .legend-row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
 .legend-swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.20); }
 .legend-swatch--pass { background: rgba(34,197,94,0.85); }
