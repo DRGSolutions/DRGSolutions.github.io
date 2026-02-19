@@ -3193,7 +3193,12 @@ function onPointerDown(e) {
     });
 
     els.btnPreview.addEventListener("click", () => runPreview());
-    els.btnRunQc.addEventListener("click", () => runQc());
+    els.btnRunQc.addEventListener("click", () => {
+      const rulesBtn = document.querySelector('.tab-btn[data-tab="rules"]');
+      if (rulesBtn) rulesBtn.click();
+      // Let the tab switch paint before QC work runs.
+      setTimeout(() => runQc(), 0);
+    });
     els.btnReset.addEventListener("click", () => resetAll());
 
     // Export/Import rule sets (local file).

@@ -992,3 +992,11 @@ body.is-3d .legend-row--3d { display: flex; }
   border: 1px dashed rgba(250, 204, 21, 0.80);
   box-shadow: 0 0 20px rgba(250, 204, 21, 0.14);
 }
+
+
+/* Ensure <select> dropdown options remain readable (browser menus often use a white background). */
+select option,
+select optgroup {
+  background: #ffffff;
+  color: #0b1020;
+}
