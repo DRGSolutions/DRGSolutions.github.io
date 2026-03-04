@@ -105,6 +105,7 @@
     powerRulesFieldset: $("powerRulesFieldset"),
     enablePowerRules: $("enablePowerRules"),
     powerUtilitySelect: $("powerUtilitySelect"),
+    powerRulesReadonly: $("powerRulesReadonly"),
 
     // Rules inputs
     rulePoleMinAttach: $("rulePoleMinAttach"),
@@ -3749,6 +3750,190 @@ function onPointerDown(e) {
     };
   }
 
+  // Read-only Rules UI: render the selected utility's Construction Standard ruleset.
+  // This is display-only; users cannot edit power rule values in the UI.
+  function renderPowerRulesReadonly() {
+    const host = els.powerRulesReadonly;
+    if (!host) return;
+
+    // Clear
+    while (host.firstChild) host.removeChild(host.firstChild);
+
+    const powerOn = !!(rules && rules.powerEnabled);
+    const utility = String((rules && rules.powerUtility) ? rules.powerUtility : "").trim();
+    const uKey = normalizeOwnerKey(utility);
+
+    const addMuted = (txt) => {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.style.lineHeight = "1.35";
+      d.textContent = String(txt || "");
+      host.appendChild(d);
+    };
+
+    const addError = (txt) => {
+      const d = document.createElement("div");
+      d.className = "power-rules-readonly__error";
+      d.textContent = String(txt || "");
+      host.appendChild(d);
+    };
+
+    if (!powerOn) {
+      addMuted("Enable Power Rules to view the active power ruleset.");
+      return;
+    }
+
+    if (!utility) {
+      addMuted("Select a power utility to view its Construction Standard rule sets.");
+      return;
+    }
+
+    const activeOk = !!(uKey && powerRulesActive && powerRulesActive.config && powerRulesActive.utilityKey === uKey);
+    if (!activeOk) {
+      const cached = uKey && powerRulesCache.has(uKey) ? powerRulesCache.get(uKey) : null;
+      if (cached && cached.ok === false && cached.error) {
+        addError(`Failed to load rules for ${utility}: ${cached.error}`);
+      } else {
+        addMuted(`Loading ${utility} rules…`);
+      }
+      return;
+    }
+
+    const config = powerRulesActive.config;
+    const stdObj = (config && typeof config === "object" && config.constructionStandards && typeof config.constructionStandards === "object")
+      ? config.constructionStandards
+      : {};
+
+    const stdKeys = Object.keys(stdObj)
+      .map((k) => String(k || "").trim())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+
+    // Header
+    {
+      const header = document.createElement("div");
+      header.className = "power-rules-readonly__header";
+
+      const title = document.createElement("div");
+      title.className = "power-rules-readonly__title";
+      title.textContent = `Loaded rules: ${powerRulesActive.utilityName || utility}`;
+
+      const meta = document.createElement("div");
+      meta.className = "muted";
+      meta.textContent = `Construction Standards: ${stdKeys.length}`;
+
+      header.appendChild(title);
+      header.appendChild(meta);
+      host.appendChild(header);
+
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.style.marginTop = "2px";
+      note.textContent = "These values are read-only and come from the selected utility’s .rls file.";
+      host.appendChild(note);
+    }
+
+    if (!stdKeys.length) {
+      addMuted("No Construction Standards are defined in this ruleset.");
+      return;
+    }
+
+    const utilName = String(powerRulesActive.utilityName || utility || "Utility");
+
+    const RULE_META = [
+      {
+        key: "primaryToNeutralSecondarySeparation",
+        label: "Primary and lowest Neutral or Secondary separation minimum",
+        valueKey: "minIn",
+        unit: '"',
+      },
+      {
+        key: "neutralSecondaryBelowTransformer",
+        label: "Neutral and Secondaries must be below Transformers",
+      },
+      {
+        key: "guySeparationToNeutralSecondary",
+        label: `${utilName} guys / down-guys minimum distance to Neutrals and Secondaries`,
+        valueKey: "minIn",
+        unit: '"',
+      },
+      {
+        key: "guyAboveNeutralSecondary",
+        label: `${utilName} guys / down-guys must be above Neutrals and Secondaries`,
+      },
+      {
+        key: "guyBelowNeutralSecondary",
+        label: `${utilName} guys / down-guys must be below Neutrals and Secondaries`,
+      },
+    ];
+
+    const fmtIn = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "—";
+      const whole = Math.round(n);
+      return `${whole}${'"'}`;
+    };
+
+    for (const stdKey of stdKeys) {
+      const std = stdObj[stdKey];
+      const ruleBag = (std && typeof std === "object" && std.rules && typeof std.rules === "object") ? std.rules : {};
+
+      const box = document.createElement("details");
+      box.className = "power-std";
+      box.open = true;
+
+      const summary = document.createElement("summary");
+      summary.textContent = `Construction Standard ${stdKey}`;
+      box.appendChild(summary);
+
+      const table = document.createElement("table");
+      table.className = "table table--small power-std__table";
+
+      const thead = document.createElement("thead");
+      const hr = document.createElement("tr");
+      ["Rule", "Enabled", "Value"].forEach((t) => {
+        const th = document.createElement("th");
+        th.textContent = t;
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+
+      for (const meta of RULE_META) {
+        const rr = ruleBag && ruleBag[meta.key] ? ruleBag[meta.key] : null;
+        const enabled = !!(rr && rr.enabled);
+
+        let valueStr = "—";
+        if (rr && meta.valueKey && rr[meta.valueKey] != null) valueStr = fmtIn(rr[meta.valueKey]);
+
+        const tr = document.createElement("tr");
+
+        const tdRule = document.createElement("td");
+        tdRule.textContent = meta.label;
+        tr.appendChild(tdRule);
+
+        const tdEn = document.createElement("td");
+        const badge = document.createElement("span");
+        badge.className = `badge ${enabled ? "badge--pass" : "badge--unknown"}`;
+        badge.textContent = enabled ? "Enabled" : "Disabled";
+        tdEn.appendChild(badge);
+        tr.appendChild(tdEn);
+
+        const tdVal = document.createElement("td");
+        tdVal.textContent = valueStr;
+        tr.appendChild(tdVal);
+
+        tbody.appendChild(tr);
+      }
+
+      table.appendChild(tbody);
+      box.appendChild(table);
+      host.appendChild(box);
+    }
+  }
+
   function embeddedAssetIdForPath(path) {
     // Keep in sync with index.html embedded asset IDs.
     return `embeddedAsset_${String(path || "").replace(/[^a-z0-9]/gi, "_")}`;
@@ -6181,6 +6366,10 @@ function onPointerDown(e) {
     if (els.commsRulesFieldset) els.commsRulesFieldset.disabled = !rules.commsEnabled;
     if (els.powerRulesFieldset) els.powerRulesFieldset.disabled = !rules.powerEnabled;
 
+    // Installing company dropdown lives in the Communications Rules header (outside the fieldset).
+    // Keep it disabled until Communications Rules are enabled.
+    if (els.ruleInstallingCompany) els.ruleInstallingCompany.disabled = !rules.commsEnabled;
+
     // Global UI state (used for legend + Issues column toggles).
     try {
       document.body.classList.toggle("power-rules-on", !!rules.powerEnabled);
@@ -6203,6 +6392,9 @@ function onPointerDown(e) {
       els.powerUtilitySelect.value = want;
       if (els.powerUtilitySelect.value !== want) els.powerUtilitySelect.value = "";
     }
+
+    // Power Rules read-only view
+    renderPowerRulesReadonly();
   }
 
   function onRulesUiChange() {
@@ -6235,6 +6427,9 @@ function onPointerDown(e) {
 
       // Ensure the active context matches the selected utility.
       if (!ctx || ctx.utilityKey !== utilityKey) return;
+
+      // Update read-only Power Rules display now that the ruleset is loaded.
+      renderPowerRulesReadonly();
 
       updateConstructionStandardCallouts();
       if (model) recomputeQc();

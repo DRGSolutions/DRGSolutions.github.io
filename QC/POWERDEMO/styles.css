@@ -306,6 +306,29 @@ button.ghost {
 }
 .chip input { margin: 0; }
 
+/* Compact dropdown chip used in the Communications Rules header */
+.chip--dropdown {
+  padding: 6px 10px;
+}
+.chip--dropdown > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.chip--dropdown .chip-select--in-chip {
+  width: auto;
+  min-width: 200px;
+  border: 0;
+  background-color: transparent;
+  padding: 2px 22px 2px 8px;
+}
+.chip--dropdown .chip-select--in-chip:focus {
+  box-shadow: none;
+}
+.chip--dropdown .chip-select--in-chip:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 /* 3D-only toolbar controls */
 #basemap3dGroup {
   display: none;
@@ -896,6 +919,47 @@ body.power-rules-on .issues-col-cs { display: table-cell; }
 .rules-fieldset:disabled {
   opacity: 0.55;
 }
+
+/* Power Rules read-only ruleset display */
+.power-rules-readonly {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.power-rules-readonly__header {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.power-rules-readonly__title {
+  font-size: 13px;
+  font-weight: 800;
+}
+.power-rules-readonly__error {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(239,68,68,0.35);
+  background: rgba(239,68,68,0.10);
+  color: rgba(255, 196, 196, 0.95);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.power-std {
+  background: rgba(0,0,0,0.12);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+.power-std summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: rgba(232,238,252,0.92);
+}
+.power-std__table { margin-top: 8px; }
 
 .rules-grid {
   display: grid;

@@ -205,6 +205,11 @@
                 <label class="chip" title="Enable/disable Communications Rules">
                   <input type="checkbox" id="enableCommsRules" /> Enable
                 </label>
+
+                <label class="chip chip--dropdown" title="Installing company (applies stricter comm separation)">
+                  <span>Installing company</span>
+                  <select id="ruleInstallingCompany" class="chip-select chip-select--in-chip" aria-label="Installing company (applies stricter comm separation)"></select>
+                </label>
               </div>
               <p class="muted" style="margin:6px 0 0;">
                 Defaults are based on the logic you provided (NESC-first). Adjust values to apply stricter regional or utility standards.
@@ -358,10 +363,12 @@
             </div>
 
             <div class="rule-row">
-              <label class="field">
-                <span>Installing company (applies stricter comm separation)</span>
-                <select id="ruleInstallingCompany"></select>
-              </label>
+              <div class="field">
+                <span>Installing company</span>
+                <div class="muted" style="line-height:1.35;">
+                  Set above (next to <span style="font-weight:800;">Enable</span>).
+                </div>
+              </div>
               <label class="field">
                 <span>Installing company comm separation (inches)</span>
                 <input id="ruleMidCommSepInstall" type="number" min="0" step="1" />
@@ -411,6 +418,9 @@
                 <select id="powerUtilitySelect"></select>
               </label>
             </div>
+
+            <!-- Read-only view of the loaded ruleset for the selected utility -->
+            <div id="powerRulesReadonly" class="power-rules-readonly"></div>
           </fieldset>
         </div>
       </section>
