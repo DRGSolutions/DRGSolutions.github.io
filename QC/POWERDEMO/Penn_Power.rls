@@ -1,0 +1,25 @@
+{
+  "schema": "katapultQcPowerRules",
+  "schemaVersion": 1,
+  "utility": "Penn Power",
+  "constructionStandards": {
+    "A1": {
+      "rules": {
+        "primaryToNeutralSecondarySeparation": { "enabled": true, "minIn": 44 },
+        "neutralSecondaryBelowTransformer": { "enabled": false },
+        "guySeparationToNeutralSecondary": { "enabled": true, "minIn": 6 },
+        "guyAboveNeutralSecondary": { "enabled": false },
+        "guyBelowNeutralSecondary": { "enabled": false }
+      }
+    },
+    "B2": {
+      "rules": {
+        "primaryToNeutralSecondarySeparation": { "enabled": true, "minIn": 30 },
+        "neutralSecondaryBelowTransformer": { "enabled": true },
+        "guySeparationToNeutralSecondary": { "enabled": false },
+        "guyAboveNeutralSecondary": { "enabled": false },
+        "guyBelowNeutralSecondary": { "enabled": true }
+      }
+    }
+  }
+}
